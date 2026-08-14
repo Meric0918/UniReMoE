@@ -11,6 +11,7 @@ import torch
 from source.plm_unified.config import ModelConfig
 from source.plm_unified.stage8_loss import compute_stage8_loss
 from source.plm_unified.stage8_model import Stage8BindingModel
+from source.plm_unified.stage8_evaluation import evaluate_stage8_model
 
 
 try:
@@ -30,6 +31,13 @@ try:
 except ModuleNotFoundError:
     stage10_model = None
     stage10_loss = None
+
+try:
+    stage10_evaluation = importlib.import_module(
+        "source.plm_unified.stage10_evaluation"
+    )
+except ModuleNotFoundError:
+    stage10_evaluation = None
 
 
 class Stage10ConfigTests(unittest.TestCase):
@@ -308,6 +316,166 @@ class Stage10ModelAndLossTests(unittest.TestCase):
         if stage10_config is None:
             raise AssertionError("stage10_config must exist")
         return stage10_config
+
+
+class Stage10EvaluationTests(unittest.TestCase):
+    @staticmethod
+    def _require_module():
+        if stage10_evaluation is None:
+            raise AssertionError(
+                "source.plm_unified.stage10_evaluation must exist"
+            )
+        return stage10_evaluation
+
+    @staticmethod
+    def _models_and_batch():
+        if stage10_model is None:
+            raise AssertionError("stage10_model must exist")
+        config = Stage10ModelAndLossTests._model_config()
+        torch.manual_seed(23)
+        source = Stage8BindingModel(config).state_dict()
+        models = stage10_model.build_stage10_teacher_student_models(
+            config,
+            source,
+            device=torch.device("cpu"),
+        )
+        batch = {
+            "peptide_hidden": torch.randn(4, 5, 8),
+            "peptide_mask": torch.ones(4, 5, dtype=torch.bool),
+            "hla_hidden": torch.randn(4, 7, 8),
+            "hla_mask": torch.ones(4, 7, dtype=torch.bool),
+            "tcr_hidden": torch.randn(4, 6, 6),
+            "tcr_mask": torch.ones(4, 6, dtype=torch.bool),
+            "ph_labels": torch.tensor([1, 1, 0, 0]),
+            "pt_labels": torch.tensor([1, 0, 1, 0]),
+            "pht_labels": torch.tensor([1, 0, 0, 0]),
+            "label_types": ["111", "100", "010", "000"],
+            "source_rows": torch.tensor([2, 3, 4, 5]),
+        }
+        return models, batch
+
+    @staticmethod
+    def _score_metrics(value: float) -> dict[str, float]:
+        return {"auroc": value, "aupr": value}
+
+    def test_equal_models_have_zero_drift_and_are_retention_eligible(self) -> None:
+        module = self._require_module()
+        models, batch = self._models_and_batch()
+
+        result = module.evaluate_stage10_models(
+            models.teacher,
+            models.student,
+            [batch],
+            device=torch.device("cpu"),
+            mixed_precision="none",
+            margin=0.05,
+            selection_weights=(0.6, 0.2, 0.2),
+            degradation_tolerance=0.002,
+        )
+
+        self.assertTrue(result.retention_eligible)
+        self.assertLess(abs(result.retention["phla_kl"]), 1e-7)
+        self.assertLess(abs(result.retention["ptcr_kl"]), 1e-7)
+        self.assertLess(result.retention["phla_probability_mae"], 1e-7)
+        self.assertLess(result.retention["ptcr_probability_mae"], 1e-7)
+        self.assertEqual(result.retention["phla_agreement"], 1.0)
+        self.assertEqual(result.retention["ptcr_agreement"], 1.0)
+        self.assertEqual(
+            result.predictions["source_rows"].tolist(),
+            [2, 3, 4, 5],
+        )
+
+    def test_student_metrics_match_stage8_evaluation(self) -> None:
+        module = self._require_module()
+        models, batch = self._models_and_batch()
+        stage10_result = module.evaluate_stage10_models(
+            models.teacher,
+            models.student,
+            [batch],
+            device=torch.device("cpu"),
+            mixed_precision="none",
+            margin=0.05,
+            selection_weights=(0.6, 0.2, 0.2),
+            degradation_tolerance=0.002,
+        )
+        stage8_result = evaluate_stage8_model(
+            models.student,
+            [batch],
+            device=torch.device("cpu"),
+            mixed_precision="none",
+            margin=0.05,
+            selection_weights=(0.6, 0.2, 0.2),
+        )
+
+        self.assertAlmostEqual(
+            stage10_result.joint_score,
+            stage8_result.joint_score,
+            places=7,
+        )
+        self.assertAlmostEqual(
+            stage10_result.selected_pht_threshold,
+            stage8_result.selected_pht_threshold,
+            places=7,
+        )
+        for task in ("phla", "ptcr", "pht"):
+            for metric in (
+                "accuracy",
+                "aupr",
+                "auroc",
+                "f1",
+                "loss",
+                "mcc",
+                "precision",
+                "recall",
+                "specificity",
+            ):
+                self.assertAlmostEqual(
+                    stage10_result.student_metrics[task][metric],
+                    stage8_result.metrics[task][metric],
+                    places=7,
+                )
+        self.assertEqual(
+            stage10_result.student_metrics["violations"],
+            stage8_result.metrics["violations"],
+        )
+
+    def test_retention_gate_rejects_pt_drop_beyond_tolerance(self) -> None:
+        module = self._require_module()
+        teacher_metrics = {
+            "phla": self._score_metrics(0.90),
+            "ptcr": self._score_metrics(0.90),
+        }
+        student_metrics = {
+            "phla": self._score_metrics(0.91),
+            "ptcr": self._score_metrics(0.897),
+        }
+
+        self.assertFalse(
+            module.retention_is_eligible(
+                student_metrics,
+                teacher_metrics,
+                tolerance=0.002,
+            )
+        )
+
+    def test_retention_gate_accepts_exact_tolerance_boundary(self) -> None:
+        module = self._require_module()
+        teacher_metrics = {
+            "phla": self._score_metrics(0.90),
+            "ptcr": self._score_metrics(0.90),
+        }
+        student_metrics = {
+            "phla": self._score_metrics(0.898),
+            "ptcr": self._score_metrics(0.898),
+        }
+
+        self.assertTrue(
+            module.retention_is_eligible(
+                student_metrics,
+                teacher_metrics,
+                tolerance=0.002,
+            )
+        )
 
 
 if __name__ == "__main__":
