@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib
+import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 import torch
@@ -38,6 +40,13 @@ try:
     )
 except ModuleNotFoundError:
     stage10_evaluation = None
+
+try:
+    stage10_checkpoint = importlib.import_module(
+        "source.plm_unified.stage10_checkpoint"
+    )
+except ModuleNotFoundError:
+    stage10_checkpoint = None
 
 
 class Stage10ConfigTests(unittest.TestCase):
@@ -316,6 +325,294 @@ class Stage10ModelAndLossTests(unittest.TestCase):
         if stage10_config is None:
             raise AssertionError("stage10_config must exist")
         return stage10_config
+
+
+class Stage10CheckpointTests(unittest.TestCase):
+    @staticmethod
+    def _require_module():
+        if stage10_checkpoint is None:
+            raise AssertionError(
+                "source.plm_unified.stage10_checkpoint must exist"
+            )
+        return stage10_checkpoint
+
+    @staticmethod
+    def _config(root: Path, checkpoint_path: Path):
+        if stage10_config is None:
+            raise AssertionError("stage10_config must exist")
+        return stage10_config.Stage10ExperimentConfig(
+            paths=stage10_config.Stage10Paths(
+                project_root=root,
+                data_root=root / "data",
+                cache_root=root / "cache",
+                output_root=root / "models",
+                swanlog_root=root / "logs",
+                stage3_checkpoint=checkpoint_path,
+            ),
+            model=Stage10ModelAndLossTests._model_config(),
+        )
+
+    @staticmethod
+    def _stage3_checkpoint(config) -> dict:
+        binding = Stage8BindingModel(config.model)
+        state = {
+            f"binding_model.{name}": tensor.detach().clone()
+            for name, tensor in binding.state_dict().items()
+        }
+        state.update(
+            {
+                "peptide_encoder.dummy": torch.tensor([1.0]),
+                "hla_encoder.dummy": torch.tensor([2.0]),
+                "tcr_encoder.dummy": torch.tensor([3.0]),
+            }
+        )
+        return {
+            "format_version": 1,
+            "checkpoint_type": "stage3_multitask_model",
+            "tasks": ["phla", "ptcr", "triplet"],
+            "config": {
+                "model": config.to_dict()["model"],
+                "training": {"fold": 4, "seed": 2026},
+            },
+            "initialization_source": {
+                "kind": "stage1",
+                "source_fold": 4,
+                "source_seed": 2026,
+            },
+            "model": state,
+        }
+
+    @staticmethod
+    def _lean_checkpoint(module, config, source, effective_data):
+        contract = module.stage10_training_contract(config, effective_data)
+        return {
+            "format_version": 1,
+            "checkpoint_type": "stage10_binding_model",
+            "artifact_role": "last",
+            "condition": "full",
+            "model": {
+                name: tensor.detach().clone()
+                for name, tensor in source.binding_state.items()
+            },
+            "best_model": {
+                name: tensor.detach().clone()
+                for name, tensor in source.binding_state.items()
+            },
+            "config": config.to_dict(),
+            "source_stage3": source.lineage,
+            "teacher_policy": contract["descriptor"]["teacher_policy"],
+            "training_contract": contract,
+            "optimizer": {"state": {}},
+            "scheduler": {"last_epoch": 0},
+            "scaler": {},
+            "rng_state": {},
+            "validation_metrics": {"pht": {"auroc": 0.8}},
+            "validation_retention": {"eligible": True},
+            "validation_joint_score": 0.8,
+            "selected_pht_threshold": 0.5,
+            "global_step": 1,
+            "run_timestamp": "20260814_000000_000001",
+        }
+
+    def test_stage3_teacher_source_validates_lineage_and_extracts_binding(self):
+        module = self._require_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "stage3.pt"
+            config = self._config(root, path)
+            payload = self._stage3_checkpoint(config)
+            torch.save(payload, path)
+
+            source = module.load_stage3_teacher_source(config)
+
+            self.assertEqual(len(source.sha256), 64)
+            self.assertEqual(source.lineage["kind"], "stage3")
+            self.assertEqual(source.lineage["role"], "teacher_initialization")
+            self.assertEqual(
+                set(source.binding_state),
+                {
+                    name.removeprefix("binding_model.")
+                    for name in payload["model"]
+                    if name.startswith("binding_model.")
+                },
+            )
+            self.assertFalse(
+                any(name.endswith("encoder.dummy") for name in source.binding_state)
+            )
+
+    def test_stage3_teacher_source_rejects_invalid_contract_fields(self):
+        module = self._require_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "stage3.pt"
+            config = self._config(root, path)
+            valid = self._stage3_checkpoint(config)
+            invalid_payloads = {}
+
+            changed = deepcopy(valid)
+            changed["format_version"] = 2
+            invalid_payloads["format"] = changed
+            changed = deepcopy(valid)
+            changed["checkpoint_type"] = "stage8_binding_model"
+            invalid_payloads["type"] = changed
+            changed = deepcopy(valid)
+            changed["tasks"] = ["phla", "ptcr"]
+            invalid_payloads["tasks"] = changed
+            changed = deepcopy(valid)
+            changed["config"]["model"]["model_dim"] = 16
+            invalid_payloads["model"] = changed
+            changed = deepcopy(valid)
+            changed["config"]["training"]["fold"] = 5
+            invalid_payloads["fold"] = changed
+            changed = deepcopy(valid)
+            changed["config"]["training"]["seed"] = 42
+            invalid_payloads["seed"] = changed
+            changed = deepcopy(valid)
+            changed["initialization_source"]["kind"] = "stage2"
+            invalid_payloads["upstream"] = changed
+            changed = deepcopy(valid)
+            del changed["model"]["peptide_encoder.dummy"]
+            invalid_payloads["encoder"] = changed
+            changed = deepcopy(valid)
+            changed["model"] = {
+                name: tensor
+                for name, tensor in changed["model"].items()
+                if not name.startswith("binding_model.")
+            }
+            invalid_payloads["binding"] = changed
+
+            for case, payload in invalid_payloads.items():
+                with self.subTest(case=case):
+                    torch.save(payload, path)
+                    with self.assertRaises(ValueError):
+                        module.load_stage3_teacher_source(config)
+
+    def test_lean_and_resume_contracts_are_strict_and_teacher_free(self):
+        module = self._require_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "stage3.pt"
+            config = self._config(root, path)
+            torch.save(self._stage3_checkpoint(config), path)
+            source = module.load_stage3_teacher_source(config)
+            effective_data = {
+                "dataset_fingerprint": "data-sha",
+                "train_samples": 400,
+                "val_samples": 80,
+            }
+            lean = self._lean_checkpoint(
+                module, config, source, effective_data
+            )
+
+            module.validate_stage10_lean_checkpoint(
+                lean, config, source.sha256
+            )
+            module.validate_stage10_resume_checkpoint(
+                lean,
+                config,
+                source.sha256,
+                effective_data,
+                condition="full",
+            )
+            contract = lean["training_contract"]["descriptor"]
+            self.assertEqual(contract["stage10"], config.to_dict()["stage10"])
+            self.assertEqual(contract["effective_data"], effective_data)
+            self.assertTrue(contract["teacher_policy"]["frozen"])
+            self.assertEqual(
+                contract["teacher_policy"]["distilled_tasks"],
+                ["phla", "ptcr"],
+            )
+
+            wrong_source = deepcopy(lean)
+            wrong_source["source_stage3"]["sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "different Stage-3"):
+                module.validate_stage10_lean_checkpoint(
+                    wrong_source, config, source.sha256
+                )
+
+            with_teacher = deepcopy(lean)
+            with_teacher["teacher"] = source.binding_state
+            with self.assertRaisesRegex(ValueError, "teacher"):
+                module.validate_stage10_lean_checkpoint(
+                    with_teacher, config, source.sha256
+                )
+
+            best = deepcopy(lean)
+            best["artifact_role"] = "best"
+            with self.assertRaisesRegex(ValueError, "last"):
+                module.validate_stage10_resume_checkpoint(
+                    best,
+                    config,
+                    source.sha256,
+                    effective_data,
+                    condition="full",
+                )
+
+            with self.assertRaisesRegex(ValueError, "condition"):
+                module.validate_stage10_resume_checkpoint(
+                    lean,
+                    config,
+                    source.sha256,
+                    effective_data,
+                    condition="baseline",
+                )
+
+            changed_data = dict(effective_data, train_samples=404)
+            with self.assertRaisesRegex(ValueError, "training contract mismatch"):
+                module.validate_stage10_resume_checkpoint(
+                    lean,
+                    config,
+                    source.sha256,
+                    changed_data,
+                    condition="full",
+                )
+
+    def test_full_export_contains_student_and_no_teacher_or_training_state(self):
+        module = self._require_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "stage3.pt"
+            destination = root / "stage10_full.pt"
+            config = self._config(root, path)
+            stage3_payload = self._stage3_checkpoint(config)
+            stage3_payload["model"]["binding_model.obsolete"] = torch.tensor(
+                [-1.0]
+            )
+            torch.save(stage3_payload, path)
+            source = module.load_stage3_teacher_source(config)
+            lean = self._lean_checkpoint(
+                module,
+                config,
+                source,
+                {"dataset_fingerprint": "data-sha"},
+            )
+            lean["model"].pop("obsolete")
+
+            module.export_stage10_full_checkpoint(source, lean, destination)
+            full = module.load_torch_checkpoint(destination, mmap=False)
+
+            self.assertEqual(full["checkpoint_type"], "stage10_multitask_model")
+            self.assertIn("peptide_encoder.dummy", full["model"])
+            self.assertNotIn("binding_model.obsolete", full["model"])
+            self.assertFalse(
+                any("teacher" in name for name in full["model"])
+            )
+            for key in (
+                "teacher",
+                "optimizer",
+                "scheduler",
+                "scaler",
+                "rng_state",
+                "best_model",
+            ):
+                self.assertNotIn(key, full)
+            module.validate_stage10_full_checkpoint(
+                full, config, source.sha256
+            )
+            exported = module.extract_stage10_binding_state(full)
+            self.assertEqual(set(exported), set(lean["model"]))
+            for name, tensor in lean["model"].items():
+                self.assertTrue(torch.equal(exported[name], tensor))
 
 
 class Stage10EvaluationTests(unittest.TestCase):
