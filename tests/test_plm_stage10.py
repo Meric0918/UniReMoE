@@ -1540,6 +1540,53 @@ class Stage10EvaluationTests(unittest.TestCase):
             )
         )
 
+    def test_retention_kl_stays_finite_for_extreme_logits(self) -> None:
+        module = self._require_module()
+
+        class ExtremeTeacher:
+            def eval(self):
+                return self
+
+            def forward_legacy_heads(self, *inputs):
+                logits = torch.tensor(
+                    [[-1000.0, 1000.0]] * 4,
+                    device=inputs[0].device,
+                )
+                return SimpleNamespace(
+                    phla_logits=logits,
+                    ptcr_logits=logits,
+                )
+
+        class ExtremeStudent:
+            def eval(self):
+                return self
+
+            def forward_all(self, *inputs):
+                logits = torch.tensor(
+                    [[1000.0, -1000.0]] * 4,
+                    device=inputs[0].device,
+                )
+                return SimpleNamespace(
+                    phla_logits=logits,
+                    ptcr_logits=logits,
+                    pht_logits=torch.zeros(4, 2, device=inputs[0].device),
+                )
+
+        _, batch = self._models_and_batch()
+        result = module.evaluate_stage10_models(
+            ExtremeTeacher(),
+            ExtremeStudent(),
+            [batch],
+            device=torch.device("cpu"),
+            mixed_precision="none",
+            margin=0.05,
+            selection_weights=(0.6, 0.2, 0.2),
+            degradation_tolerance=0.002,
+        )
+
+        self.assertTrue(np.isfinite(result.retention["phla_kl"]))
+        self.assertTrue(np.isfinite(result.retention["ptcr_kl"]))
+
 
 if __name__ == "__main__":
     unittest.main()

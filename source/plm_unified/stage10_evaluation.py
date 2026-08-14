@@ -268,7 +268,7 @@ def evaluate_stage10_models(
                 teacher_probability[:, 1].cpu().numpy()
             )
             per_row_kl = F.kl_div(
-                student_probability.log(),
+                F.log_softmax(student_logits[task].float(), dim=-1),
                 teacher_probability,
                 reduction="none",
             ).sum(dim=-1)
