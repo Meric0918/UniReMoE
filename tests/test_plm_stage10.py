@@ -6,7 +6,9 @@ import importlib
 import tempfile
 import unittest
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -47,6 +49,13 @@ try:
     )
 except ModuleNotFoundError:
     stage10_checkpoint = None
+
+try:
+    stage10_trainer = importlib.import_module(
+        "source.plm_unified.stage10_trainer"
+    )
+except ModuleNotFoundError:
+    stage10_trainer = None
 
 
 class Stage10ConfigTests(unittest.TestCase):
@@ -613,6 +622,298 @@ class Stage10CheckpointTests(unittest.TestCase):
             self.assertEqual(set(exported), set(lean["model"]))
             for name, tensor in lean["model"].items():
                 self.assertTrue(torch.equal(exported[name], tensor))
+
+
+class Stage10TrainerTests(unittest.TestCase):
+    @staticmethod
+    def _require_module():
+        if stage10_trainer is None:
+            raise AssertionError(
+                "source.plm_unified.stage10_trainer must exist"
+            )
+        return stage10_trainer
+
+    @staticmethod
+    def _config(root: Path):
+        if stage10_config is None:
+            raise AssertionError("stage10_config must exist")
+        config = stage10_config.Stage10ExperimentConfig(
+            paths=stage10_config.Stage10Paths(
+                project_root=root,
+                data_root=root / "data",
+                cache_root=root / "cache",
+                output_root=root / "models",
+                swanlog_root=root / "logs",
+                stage3_checkpoint=root / "stage3.pt",
+            ),
+            model=Stage10ModelAndLossTests._model_config(),
+        )
+        config.stage10.batch_size = 4
+        config.stage10.eval_batch_size = 4
+        config.stage10.max_epochs = 1
+        config.stage10.min_epochs = 1
+        config.stage10.early_stopping_patience = 1
+        config.stage10.mixed_precision = "none"
+        config.validate()
+        return config
+
+    @staticmethod
+    def _pair_and_source(config):
+        if stage10_model is None or stage10_checkpoint is None:
+            raise AssertionError("Stage10 model and checkpoint modules must exist")
+        torch.manual_seed(31)
+        binding_state = Stage8BindingModel(config.model).state_dict()
+        pair = stage10_model.build_stage10_teacher_student_models(
+            config.model,
+            binding_state,
+            device=torch.device("cpu"),
+        )
+        source = stage10_checkpoint.Stage3TeacherSource(
+            path=config.paths.stage3_checkpoint,
+            sha256="a" * 64,
+            checkpoint={},
+            binding_state={
+                name: tensor.detach().clone()
+                for name, tensor in binding_state.items()
+            },
+            lineage={
+                "kind": "stage3",
+                "role": "teacher_initialization",
+                "sha256": "a" * 64,
+                "source_fold": 4,
+                "source_seed": 2026,
+            },
+        )
+        return pair, source
+
+    @staticmethod
+    def _batch():
+        torch.manual_seed(37)
+        return {
+            "peptide_hidden": torch.randn(4, 5, 8),
+            "peptide_mask": torch.ones(4, 5, dtype=torch.bool),
+            "hla_hidden": torch.randn(4, 7, 8),
+            "hla_mask": torch.ones(4, 7, dtype=torch.bool),
+            "tcr_hidden": torch.randn(4, 6, 6),
+            "tcr_mask": torch.ones(4, 6, dtype=torch.bool),
+            "ph_labels": torch.tensor([1, 1, 0, 0]),
+            "pt_labels": torch.tensor([1, 0, 1, 0]),
+            "pht_labels": torch.tensor([1, 0, 0, 0]),
+            "label_types": ["111", "100", "010", "000"],
+            "source_rows": torch.tensor([2, 3, 4, 5]),
+        }
+
+    @staticmethod
+    def _data_audit():
+        return {
+            "dataset_fingerprint": "data-sha",
+            "effective_data": {
+                "dataset_fingerprint": "data-sha",
+                "train_samples": 4,
+                "val_samples": 4,
+            },
+        }
+
+    def test_optimizer_has_every_student_parameter_and_no_teacher(self):
+        module = self._require_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self._config(Path(temporary))
+            pair, _ = self._pair_and_source(config)
+
+            optimizer = module.build_stage10_optimizer(
+                pair.teacher,
+                pair.student,
+                config,
+            )
+            optimized = {
+                id(parameter)
+                for group in optimizer.param_groups
+                for parameter in group["params"]
+            }
+            student = {id(parameter) for parameter in pair.student.parameters()}
+            teacher = {id(parameter) for parameter in pair.teacher.parameters()}
+
+            self.assertEqual(optimized, student)
+            self.assertTrue(optimized.isdisjoint(teacher))
+            self.assertEqual(
+                [group["name"] for group in optimizer.param_groups],
+                ["adapters", "pretrained_attention", "triplet_modules"],
+            )
+            with self.assertRaisesRegex(RuntimeError, "overlap"):
+                module.build_stage10_optimizer(
+                    pair.student,
+                    pair.student,
+                    config,
+                )
+
+    def test_candidate_requires_retention_and_joint_improvement(self):
+        module = self._require_module()
+        self.assertFalse(
+            module.candidate_improves(
+                SimpleNamespace(retention_eligible=False, joint_score=0.99),
+                best_joint=0.80,
+                min_delta=0.0001,
+            )
+        )
+        self.assertFalse(
+            module.candidate_improves(
+                SimpleNamespace(retention_eligible=True, joint_score=0.8001),
+                best_joint=0.80,
+                min_delta=0.0001,
+            )
+        )
+        self.assertTrue(
+            module.candidate_improves(
+                SimpleNamespace(retention_eligible=True, joint_score=0.81),
+                best_joint=0.80,
+                min_delta=0.0001,
+            )
+        )
+
+    def test_ineligible_high_joint_epoch_falls_back_to_epoch_zero(self):
+        module = self._require_module()
+
+        class IneligibleCandidateTrainer(module.Stage10Trainer):
+            evaluation_calls = 0
+
+            def train_epoch(self, epoch):
+                return {}
+
+            def evaluate(self):
+                evaluation = super().evaluate()
+                self.evaluation_calls += 1
+                if self.evaluation_calls == 2:
+                    return replace(
+                        evaluation,
+                        joint_score=evaluation.joint_score + 1.0,
+                        retention_eligible=False,
+                    )
+                return evaluation
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = self._config(root)
+            pair, source = self._pair_and_source(config)
+            trainer = IneligibleCandidateTrainer(
+                pair,
+                config,
+                [self._batch()],
+                [self._batch()],
+                condition="full",
+                source=source,
+                data_audit=self._data_audit(),
+                run_timestamp="20260814_010000_000001",
+            )
+
+            summary = trainer.fit()
+
+            self.assertEqual(summary["best_epoch"], 0)
+            best = stage10_checkpoint.load_torch_checkpoint(
+                summary["best_checkpoint"], mmap=False
+            )
+            self.assertEqual(best["epoch"], 0)
+            self.assertTrue(best["validation_retention"]["eligible"])
+
+    def test_one_epoch_student_only_checkpoint_and_strict_resume(self):
+        module = self._require_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = self._config(root)
+            pair, source = self._pair_and_source(config)
+            teacher_before = {
+                name: tensor.detach().clone()
+                for name, tensor in pair.teacher.state_dict().items()
+            }
+            timestamp = "20260814_020000_000001"
+            trainer = module.Stage10Trainer(
+                pair,
+                config,
+                [self._batch()],
+                [self._batch()],
+                condition="full",
+                source=source,
+                data_audit=self._data_audit(),
+                run_timestamp=timestamp,
+            )
+
+            summary = trainer.fit()
+            checkpoint = stage10_checkpoint.load_torch_checkpoint(
+                summary["last_checkpoint"], mmap=False
+            )
+
+            self.assertEqual(
+                checkpoint["checkpoint_type"], "stage10_binding_model"
+            )
+            self.assertNotIn("teacher", checkpoint)
+            self.assertIn("teacher_policy", checkpoint)
+            self.assertIn("validation_retention", checkpoint)
+            self.assertIsInstance(checkpoint["best_model"], dict)
+            self.assertFalse(
+                any(name.startswith("binding_model.") for name in checkpoint["model"])
+            )
+            for name, tensor in pair.teacher.state_dict().items():
+                self.assertTrue(torch.equal(tensor, teacher_before[name]))
+            prediction_header = Path(
+                summary["validation_predictions"]
+            ).read_text(encoding="utf-8").splitlines()[0]
+            for column in (
+                "student_prob_PH",
+                "student_prob_PT",
+                "student_prob_PHT",
+                "teacher_prob_PH",
+                "teacher_prob_PT",
+                "PH_probability_drift",
+                "PT_probability_drift",
+            ):
+                self.assertIn(column, prediction_header)
+
+            Path(summary["best_checkpoint"]).unlink()
+            Path(summary["validation_predictions"]).unlink()
+            resumed_pair, _ = self._pair_and_source(config)
+            resumed = module.Stage10Trainer(
+                resumed_pair,
+                config,
+                [self._batch()],
+                [self._batch()],
+                condition="full",
+                source=source,
+                data_audit=self._data_audit(),
+                run_timestamp=timestamp,
+            )
+            resumed.fit(resume=summary["last_checkpoint"])
+            self.assertTrue(resumed.best_path.is_file())
+            self.assertTrue(resumed.prediction_path.is_file())
+            resumed.models.assert_teacher_frozen()
+
+            rejecting_pair, _ = self._pair_and_source(config)
+            rejecting = module.Stage10Trainer(
+                rejecting_pair,
+                config,
+                [self._batch()],
+                [self._batch()],
+                condition="full",
+                source=source,
+                data_audit=self._data_audit(),
+                run_timestamp=timestamp,
+            )
+            with self.assertRaisesRegex(ValueError, "last"):
+                rejecting.resume(resumed.best_path)
+
+            changed_config = deepcopy(config)
+            changed_config.stage10.keep_loss_weight = 0.9
+            changed_pair, _ = self._pair_and_source(changed_config)
+            changed = module.Stage10Trainer(
+                changed_pair,
+                changed_config,
+                [self._batch()],
+                [self._batch()],
+                condition="full",
+                source=source,
+                data_audit=self._data_audit(),
+                run_timestamp=timestamp,
+            )
+            with self.assertRaisesRegex(ValueError, "training contract mismatch"):
+                changed.resume(resumed.last_path)
 
 
 class Stage10EvaluationTests(unittest.TestCase):
