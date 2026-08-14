@@ -6,6 +6,12 @@ import importlib
 import unittest
 from pathlib import Path
 
+import torch
+
+from source.plm_unified.config import ModelConfig
+from source.plm_unified.stage8_loss import compute_stage8_loss
+from source.plm_unified.stage8_model import Stage8BindingModel
+
 
 try:
     stage10_config = importlib.import_module(
@@ -13,6 +19,17 @@ try:
     )
 except ModuleNotFoundError:
     stage10_config = None
+
+try:
+    stage10_model = importlib.import_module(
+        "source.plm_unified.stage10_model"
+    )
+    stage10_loss = importlib.import_module(
+        "source.plm_unified.stage10_loss"
+    )
+except ModuleNotFoundError:
+    stage10_model = None
+    stage10_loss = None
 
 
 class Stage10ConfigTests(unittest.TestCase):
@@ -122,6 +139,175 @@ class Stage10ConfigTests(unittest.TestCase):
         self.assertEqual(config.swanlab.mode, "online")
         self.assertEqual(config.paths.output_root.name, "PLM_Stage10")
         self.assertEqual(config.paths.swanlog_root.name, "PLM_Stage10")
+
+
+class Stage10ModelAndLossTests(unittest.TestCase):
+    @staticmethod
+    def _model_config() -> ModelConfig:
+        return ModelConfig(
+            peptide_input_dim=8,
+            hla_input_dim=8,
+            tcr_input_dim=6,
+            adapter_hidden_dim=8,
+            model_dim=8,
+            num_attention_heads=2,
+            feedforward_dim=16,
+            adapter_dropout=0.0,
+            attention_dropout=0.0,
+            classifier_dropout=0.0,
+            peptide_min_length=1,
+            peptide_max_length=5,
+            hla_max_length=7,
+            tcr_max_length=6,
+        )
+
+    def _require_modules(self):
+        self.assertIsNotNone(
+            stage10_model,
+            "source.plm_unified.stage10_model must exist",
+        )
+        self.assertIsNotNone(
+            stage10_loss,
+            "source.plm_unified.stage10_loss must exist",
+        )
+        return stage10_model, stage10_loss
+
+    @staticmethod
+    def _inputs():
+        return (
+            torch.randn(3, 5, 8),
+            torch.ones(3, 5, dtype=torch.bool),
+            torch.randn(3, 7, 8),
+            torch.ones(3, 7, dtype=torch.bool),
+            torch.randn(3, 6, 6),
+            torch.ones(3, 6, dtype=torch.bool),
+        )
+
+    def test_teacher_and_student_start_equal_and_teacher_stays_frozen(self) -> None:
+        model_module, _ = self._require_modules()
+        source = Stage8BindingModel(self._model_config()).state_dict()
+        pair = model_module.build_stage10_teacher_student_models(
+            self._model_config(),
+            source,
+            device=torch.device("cpu"),
+        )
+
+        pair.teacher.train(True)
+        self.assertFalse(pair.teacher.training)
+        self.assertFalse(
+            any(parameter.requires_grad for parameter in pair.teacher.parameters())
+        )
+        self.assertTrue(
+            all(parameter.requires_grad for parameter in pair.student.parameters())
+        )
+        for name, tensor in pair.teacher.state_dict().items():
+            self.assertTrue(torch.equal(tensor, pair.student.state_dict()[name]))
+        pair.assert_teacher_frozen()
+
+    def test_teacher_legacy_heads_match_initial_student_outputs(self) -> None:
+        model_module, _ = self._require_modules()
+        source = Stage8BindingModel(self._model_config()).state_dict()
+        pair = model_module.build_stage10_teacher_student_models(
+            self._model_config(),
+            source,
+            device=torch.device("cpu"),
+        )
+        pair.student.eval()
+
+        inputs = self._inputs()
+        teacher = pair.teacher.forward_legacy_heads(*inputs)
+        student = pair.student.forward_all(*inputs)
+
+        torch.testing.assert_close(teacher.phla_logits, student.phla_logits)
+        torch.testing.assert_close(teacher.ptcr_logits, student.ptcr_logits)
+        self.assertEqual(student.pht_logits.shape, (3, 2))
+
+    def test_distillation_kl_is_zero_for_equal_logits(self) -> None:
+        _, loss_module = self._require_modules()
+        teacher = torch.tensor([[2.0, -1.0], [-1.0, 2.0]])
+        student = teacher.clone().requires_grad_(True)
+
+        value = loss_module.distillation_kl(
+            student,
+            teacher,
+            temperature=1.0,
+        )
+
+        self.assertEqual(value.dtype, torch.float32)
+        self.assertAlmostEqual(float(value.detach()), 0.0, places=7)
+        value.backward()
+        self.assertIsNotNone(student.grad)
+        self.assertIsNone(teacher.grad)
+
+    def test_distillation_kl_is_positive_and_updates_only_student(self) -> None:
+        _, loss_module = self._require_modules()
+        teacher = torch.tensor([[3.0, -1.0], [-1.0, 3.0]])
+        student = torch.tensor(
+            [[-1.0, 3.0], [3.0, -1.0]],
+            dtype=torch.float16,
+            requires_grad=True,
+        )
+
+        value = loss_module.distillation_kl(
+            student,
+            teacher,
+            temperature=1.0,
+        )
+        value.backward()
+
+        self.assertGreater(float(value.detach()), 0.0)
+        self.assertEqual(value.dtype, torch.float32)
+        self.assertGreater(float(student.grad.abs().sum()), 0.0)
+        self.assertIsNone(teacher.grad)
+
+    def test_nonpositive_distillation_temperature_is_rejected(self) -> None:
+        _, loss_module = self._require_modules()
+        logits = torch.zeros(2, 2)
+        with self.assertRaisesRegex(ValueError, "temperature"):
+            loss_module.distillation_kl(logits, logits, temperature=0.0)
+
+    def test_zero_keep_weight_is_exact_stage8_loss(self) -> None:
+        _, loss_module = self._require_modules()
+        config_module = self._require_config_module()
+        phla = torch.tensor([[0.0, 2.0], [2.0, 0.0]], requires_grad=True)
+        ptcr = torch.tensor([[0.0, 1.0], [1.0, 0.0]], requires_grad=True)
+        pht = torch.tensor([[0.0, 3.0], [3.0, 0.0]], requires_grad=True)
+        labels = torch.tensor([1, 0])
+        label_types = ["111", "000"]
+        stage8 = compute_stage8_loss(
+            phla,
+            ptcr,
+            pht,
+            labels,
+            labels,
+            labels,
+            label_types,
+            condition="full",
+            epoch=3,
+        )
+        stage10 = loss_module.compute_stage10_loss(
+            phla,
+            ptcr,
+            pht,
+            phla.detach(),
+            ptcr.detach(),
+            labels,
+            labels,
+            labels,
+            label_types,
+            condition=config_module.Stage10Condition.FULL,
+            epoch=3,
+            keep_loss_weight=0.0,
+        )
+
+        self.assertTrue(torch.equal(stage10.stage8.total, stage8.total))
+        self.assertTrue(torch.equal(stage10.total, stage8.total))
+
+    @staticmethod
+    def _require_config_module():
+        if stage10_config is None:
+            raise AssertionError("stage10_config must exist")
+        return stage10_config
 
 
 if __name__ == "__main__":
