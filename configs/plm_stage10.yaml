@@ -1,0 +1,81 @@
+paths:
+  project_root: ..
+  data_root: ../data
+  cache_root: ../embedding_cache
+  output_root: ../trained_model/PLM_Stage10
+  swanlog_root: ../swanlog/PLM_Stage10
+  esmc_model: /home/mjp/model/ESMC-300M
+  tcr_bert_model: /home/mjp/model/TCR-Bert
+  stage3_checkpoint: ../trained_model/PLM_Triplet/fold_4/seed_2026/triplet_best_20260802_215908_285880.pt
+
+model:
+  peptide_input_dim: 960
+  hla_input_dim: 960
+  tcr_input_dim: 768
+  adapter_hidden_dim: 256
+  model_dim: 128
+  num_attention_heads: 4
+  feedforward_dim: 512
+  adapter_dropout: 0.1
+  attention_dropout: 0.1
+  classifier_dropout: 0.2
+  peptide_min_length: 8
+  peptide_max_length: 15
+  hla_max_length: 34
+  tcr_max_length: 34
+
+cache:
+  dtype: float16
+  shard_size: 16384
+  precompute_batch_size: 32
+  compression: null
+
+runtime:
+  fold: 4
+  seed: 2026
+  device: auto
+  num_workers: 2
+
+stage10:
+  data_subdir: data_triple/fold4
+  train_filename: train_merged_fold4.csv
+  val_filename: val_merged_fold4.csv
+  reject_noncanonical_sequences: true
+  batch_size: 256
+  eval_batch_size: 256
+  max_epochs: 15
+  min_epochs: 5
+  early_stopping_patience: 3
+  early_stopping_min_delta: 0.0001
+  pht_loss_weight: 1.0
+  phla_loss_weight: 0.3
+  ptcr_loss_weight: 0.2
+  pht_score_weight: 0.6
+  phla_score_weight: 0.2
+  ptcr_score_weight: 0.2
+  constraint_margin: 0.05
+  hierarchy_lambda: 0.05
+  pt_implication_lambda: 0.03
+  constraint_ramp_epochs: 5
+  joint_degradation_tolerance: 0.002
+  adapter_lr: 0.000025
+  pretrained_attention_lr: 0.00005
+  triplet_module_lr: 0.0001
+  weight_decay: 0.01
+  scheduler_warmup_ratio: 0.05
+  gradient_clip_norm: 1.0
+  mixed_precision: bf16
+  log_every_steps: 50
+  keep_loss_weight: 1.0
+  phla_keep_weight: 1.0
+  ptcr_keep_weight: 1.0
+  distillation_temperature: 1.0
+  legacy_task_degradation_tolerance: 0.002
+
+swanlab:
+  project: unifyimmun
+  workspace: null
+  mode: online
+  group: plm-stage10-fold{fold}
+  experiment_prefix: PLM-Stage10
+  tags: [ESMC-300M, TCR-BERT, stage10, teacher-student-retention]
