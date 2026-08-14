@@ -26,6 +26,9 @@ case "$ACTION" in
   evaluate)
     exec "$PYTHON_BIN" "$PROJECT_ROOT/source/evaluate_plm_stage10.py" --config "$CONFIG" "$@"
     ;;
+  evaluate-tcr)
+    exec "$PYTHON_BIN" "$PROJECT_ROOT/source/evaluate_plm_stage10_tcr_sets.py" --config "$CONFIG" "$@"
+    ;;
   export)
     exec "$PYTHON_BIN" "$PROJECT_ROOT/source/export_plm_stage10_full.py" --config "$CONFIG" "$@"
     ;;

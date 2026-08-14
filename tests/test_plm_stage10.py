@@ -62,6 +62,13 @@ try:
 except ModuleNotFoundError:
     stage10_trainer = None
 
+try:
+    stage10_external = importlib.import_module(
+        "source.plm_unified.stage10_external"
+    )
+except ModuleNotFoundError:
+    stage10_external = None
+
 
 class Stage10ConfigTests(unittest.TestCase):
     def _require_module(self):
@@ -1179,6 +1186,199 @@ class Stage10CliTests(unittest.TestCase):
             "audit|cache|train|ablations|evaluate|evaluate-tcr|export",
             result.stderr,
         )
+
+
+class Stage10ExternalEvaluationTests(unittest.TestCase):
+    @staticmethod
+    def _require_module():
+        if stage10_external is None:
+            raise AssertionError(
+                "source.plm_unified.stage10_external must exist"
+            )
+        return stage10_external
+
+    def test_comparison_report_has_signed_deltas_and_probability_summaries(self):
+        module = self._require_module()
+        labels = np.asarray([0, 1, 1, 0], dtype=np.int64)
+        probabilities = {
+            "stage3": np.asarray([0.1, 0.8, 0.7, 0.2]),
+            "stage8": np.asarray([0.2, 0.6, 0.4, 0.3]),
+            "stage10": np.asarray([0.1, 0.75, 0.65, 0.2]),
+        }
+
+        report = module.build_external_comparison_report(
+            labels,
+            probabilities,
+            threshold=0.5,
+        )
+
+        self.assertIn("stage10_minus_stage3", report["deltas"])
+        self.assertIn("stage10_minus_stage8", report["deltas"])
+        self.assertEqual(report["metrics"]["stage10"]["samples"], 4)
+        self.assertEqual(
+            report["metrics"]["stage10"]["positive_samples"], 2
+        )
+        self.assertAlmostEqual(
+            report["probability_summary"]["stage10"]["positive_mean"],
+            0.7,
+        )
+        self.assertAlmostEqual(
+            report["probability_summary"]["stage10"]["negative_mean"],
+            0.15,
+        )
+        expected = (
+            report["metrics"]["stage10"]["accuracy"]
+            - report["metrics"]["stage8"]["accuracy"]
+        )
+        self.assertAlmostEqual(
+            report["deltas"]["stage10_minus_stage8"]["accuracy"],
+            expected,
+        )
+
+    def test_comparison_without_stage8_only_reports_stage3_delta(self):
+        module = self._require_module()
+        report = module.build_external_comparison_report(
+            np.asarray([0, 1], dtype=np.int64),
+            {
+                "stage3": np.asarray([0.2, 0.8]),
+                "stage10": np.asarray([0.3, 0.7]),
+            },
+            threshold=0.5,
+        )
+        self.assertEqual(
+            set(report["deltas"]),
+            {"stage10_minus_stage3"},
+        )
+        self.assertNotIn("stage8", report["metrics"])
+
+    def test_stage8_reference_must_share_exact_stage3_sha(self):
+        module = self._require_module()
+        valid = {
+            "checkpoint_type": "stage8_binding_model",
+            "source_stage3": {"sha256": "a" * 64},
+        }
+        module.validate_stage8_reference_source(valid, "a" * 64)
+        invalid = deepcopy(valid)
+        invalid["source_stage3"]["sha256"] = "b" * 64
+        with self.assertRaisesRegex(ValueError, "different Stage-3"):
+            module.validate_stage8_reference_source(invalid, "a" * 64)
+
+    def test_multi_model_inference_preserves_row_order_and_fixed_threshold(self):
+        module = self._require_module()
+
+        class FakeBindingModel(torch.nn.Module):
+            def __init__(self, offset):
+                super().__init__()
+                self.offset = offset
+
+            def forward(
+                self,
+                task,
+                peptide_hidden,
+                peptide_mask,
+                tcr_hidden,
+                tcr_mask,
+            ):
+                if task != "ptcr":
+                    raise AssertionError("Only pTCR inference is allowed")
+                positive_logit = peptide_hidden[:, 0, 0] + self.offset
+                logits = torch.stack(
+                    (torch.zeros_like(positive_logit), positive_logit),
+                    dim=-1,
+                )
+                return SimpleNamespace(logits=logits)
+
+        encoded = module.EncodedPairSequences(
+            peptide_index={"P1": 0, "P2": 1},
+            tcr_index={"T1": 0, "T2": 1},
+            peptide_hidden=np.asarray([[[1.0]], [[-1.0]]], dtype=np.float32),
+            peptide_mask=np.ones((2, 1), dtype=np.uint8),
+            tcr_hidden=np.zeros((2, 1, 1), dtype=np.float32),
+            tcr_mask=np.ones((2, 1), dtype=np.uint8),
+        )
+        rows = [
+            module.ExternalPairRow("P2", "T1", 1, 9),
+            module.ExternalPairRow("P1", "T2", 0, 4),
+        ]
+
+        reports, probabilities = module.evaluate_binding_models_on_rows(
+            {
+                "stage10": FakeBindingModel(0.2),
+                "stage3": FakeBindingModel(0.0),
+            },
+            rows,
+            encoded,
+            device=torch.device("cpu"),
+            pair_batch_size=1,
+            threshold=0.4,
+        )
+
+        expected_stage3 = 1.0 / (1.0 + np.exp(-np.asarray([-1.0, 1.0])))
+        np.testing.assert_allclose(
+            probabilities["stage3"],
+            expected_stage3,
+            rtol=1e-6,
+        )
+        self.assertEqual(reports["stage3"]["threshold_used"], 0.4)
+        self.assertEqual(reports["stage10"]["metrics"]["samples"], 2)
+
+    def test_row_csv_has_source_rows_and_available_model_columns(self):
+        module = self._require_module()
+        rows = {
+            "set_b": [module.ExternalPairRow("P2", "T2", 0, 8)],
+            "set_a": [
+                module.ExternalPairRow("P1", "T1", 1, 3),
+                module.ExternalPairRow("P3", "T3", 0, 7),
+            ],
+        }
+        probabilities = {
+            "set_a": {
+                "stage3": np.asarray([0.8, 0.2]),
+                "stage10": np.asarray([0.7, 0.3]),
+            },
+            "set_b": {
+                "stage3": np.asarray([0.1]),
+                "stage10": np.asarray([0.2]),
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "rows.csv"
+            module.write_external_row_csv(destination, rows, probabilities)
+            lines = destination.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(
+            lines[0],
+            "dataset,source_row,peptide,tcr,label,prob_stage3,prob_stage10",
+        )
+        self.assertTrue(lines[1].startswith("set_a,3,P1,T1,1,"))
+        self.assertTrue(lines[2].startswith("set_a,7,P3,T3,0,"))
+        self.assertTrue(lines[3].startswith("set_b,8,P2,T2,0,"))
+
+    def test_external_cli_uses_fixed_threshold_and_optional_stage8(self):
+        script = Stage10CliTests._load_script(
+            "evaluate_plm_stage10_tcr_sets.py"
+        )
+        args = script.parse_args(
+            [
+                "--checkpoint",
+                "stage10.pt",
+                "--stage8-checkpoint",
+                "stage8.pt",
+                "--threshold",
+                "0.5",
+                "--rows-output",
+                "rows.csv",
+            ]
+        )
+        script.validate_args(args)
+        self.assertEqual(args.checkpoint, Path("stage10.pt"))
+        self.assertEqual(args.stage8_checkpoint, Path("stage8.pt"))
+        self.assertEqual(args.threshold, 0.5)
+        self.assertEqual(args.rows_output, Path("rows.csv"))
+        for invalid in (0.0, 1.0):
+            args.threshold = invalid
+            with self.assertRaisesRegex(ValueError, "threshold"):
+                script.validate_args(args)
 
 
 class Stage10EvaluationTests(unittest.TestCase):
