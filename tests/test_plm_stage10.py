@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
+import subprocess
+import sys
 import tempfile
 import unittest
 from copy import deepcopy
@@ -10,8 +13,10 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 
+from source.plm_unified.cache import EmbeddingCacheWriter
 from source.plm_unified.config import ModelConfig
 from source.plm_unified.stage8_loss import compute_stage8_loss
 from source.plm_unified.stage8_model import Stage8BindingModel
@@ -914,6 +919,266 @@ class Stage10TrainerTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "training contract mismatch"):
                 changed.resume(resumed.last_path)
+
+
+class Stage10CliTests(unittest.TestCase):
+    @staticmethod
+    def _project_root() -> Path:
+        return Path(__file__).resolve().parents[1]
+
+    @classmethod
+    def _load_script(cls, filename: str):
+        path = cls._project_root() / "source" / filename
+        if not path.is_file():
+            raise AssertionError(f"Stage10 entrypoint must exist: {path}")
+        source_root = str(path.parent)
+        if source_root not in sys.path:
+            sys.path.insert(0, source_root)
+        module_name = f"_stage10_test_{path.stem}"
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise AssertionError(f"Cannot import Stage10 entrypoint: {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_entrypoint_parsers_forward_all_supported_overrides(self):
+        audit = self._load_script("audit_plm_stage10_data.py").parse_args(
+            ["--config", "audit.yaml", "--report-dir", "reports"]
+        )
+        self.assertEqual(audit.config, Path("audit.yaml"))
+        self.assertEqual(audit.report_dir, Path("reports"))
+
+        cache = self._load_script(
+            "precompute_plm_stage10_embeddings.py"
+        ).parse_args(
+            [
+                "--config",
+                "cache.yaml",
+                "--stage3-checkpoint",
+                "stage3.pt",
+                "--device",
+                "cpu",
+                "--overwrite",
+            ]
+        )
+        self.assertEqual(cache.stage3_checkpoint, Path("stage3.pt"))
+        self.assertEqual(cache.device, "cpu")
+        self.assertTrue(cache.overwrite)
+
+        train = self._load_script("train_plm_stage10.py").parse_args(
+            [
+                "--config",
+                "train.yaml",
+                "--condition",
+                "full",
+                "--stage3-checkpoint",
+                "stage3.pt",
+                "--resume",
+                "last.pt",
+                "--device",
+                "cpu",
+                "--num-workers",
+                "0",
+                "--swanlab-mode",
+                "disabled",
+                "--run-timestamp",
+                "20260814_030000_000001",
+                "--limit-per-type",
+                "2",
+            ]
+        )
+        self.assertEqual(train.condition, "full")
+        self.assertEqual(train.stage3_checkpoint, Path("stage3.pt"))
+        self.assertEqual(train.resume, Path("last.pt"))
+        self.assertEqual(train.device, "cpu")
+        self.assertEqual(train.num_workers, 0)
+        self.assertEqual(train.swanlab_mode, "disabled")
+        self.assertEqual(train.run_timestamp, "20260814_030000_000001")
+        self.assertEqual(train.limit_per_type, 2)
+
+        evaluate = self._load_script("evaluate_plm_stage10.py").parse_args(
+            [
+                "--config",
+                "eval.yaml",
+                "--checkpoint",
+                "best.pt",
+                "--stage3-checkpoint",
+                "stage3.pt",
+                "--device",
+                "cpu",
+                "--num-workers",
+                "0",
+                "--output",
+                "evaluation.json",
+            ]
+        )
+        self.assertEqual(evaluate.checkpoint, Path("best.pt"))
+        self.assertEqual(evaluate.output, Path("evaluation.json"))
+        self.assertEqual(evaluate.num_workers, 0)
+
+        export = self._load_script(
+            "export_plm_stage10_full.py"
+        ).parse_args(
+            [
+                "--config",
+                "export.yaml",
+                "--checkpoint",
+                "best.pt",
+                "--stage3-checkpoint",
+                "stage3.pt",
+                "--output",
+                "full.pt",
+            ]
+        )
+        self.assertEqual(export.checkpoint, Path("best.pt"))
+        self.assertEqual(export.stage3_checkpoint, Path("stage3.pt"))
+        self.assertEqual(export.output, Path("full.pt"))
+
+    def test_ablation_commands_preserve_condition_order_and_options(self):
+        module = self._load_script("run_plm_stage10_ablations.py")
+        args = module.parse_args(
+            [
+                "--config",
+                "stage10.yaml",
+                "--stage3-checkpoint",
+                "stage3.pt",
+                "--device",
+                "cuda:1",
+                "--num-workers",
+                "3",
+                "--swanlab-mode",
+                "online",
+                "--limit-per-type",
+                "5",
+                "--precompute",
+                "--overwrite-cache",
+            ]
+        )
+
+        commands = module.build_commands(
+            args,
+            python_executable=Path("/opt/python"),
+            source_dir=Path("/project/source"),
+        )
+
+        self.assertEqual(len(commands), 5)
+        self.assertIn("precompute_plm_stage10_embeddings.py", commands[0][1])
+        self.assertIn("--overwrite", commands[0])
+        conditions = [
+            command[command.index("--condition") + 1]
+            for command in commands[1:]
+        ]
+        self.assertEqual(
+            conditions,
+            ["baseline", "hier_only", "pt_imp_only", "full"],
+        )
+        for command in commands[1:]:
+            for option, value in (
+                ("--config", "stage10.yaml"),
+                ("--stage3-checkpoint", "stage3.pt"),
+                ("--device", "cuda:1"),
+                ("--num-workers", "3"),
+                ("--swanlab-mode", "online"),
+                ("--limit-per-type", "5"),
+            ):
+                self.assertEqual(command[command.index(option) + 1], value)
+
+    def test_existing_shared_cache_is_validated_without_rewrite(self):
+        module_path = (
+            self._project_root()
+            / "source/plm_unified/stage10_precompute.py"
+        )
+        if not module_path.is_file():
+            raise AssertionError("stage10_precompute.py must exist")
+        module = importlib.import_module(
+            "source.plm_unified.stage10_precompute"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = Stage10TrainerTests._config(root)
+            source = stage10_checkpoint.Stage3TeacherSource(
+                path=root / "stage3.pt",
+                sha256="b" * 64,
+                checkpoint={},
+                binding_state={},
+                lineage={"kind": "stage3", "sha256": "b" * 64},
+            )
+            audit = SimpleNamespace(
+                dataset_fingerprint="cache-data-sha",
+                require_clean=lambda: None,
+            )
+            cache_root = config.cache_dir(source.sha256)
+            dimensions = {
+                "peptide": config.model.peptide_input_dim,
+                "hla": config.model.hla_input_dim,
+                "tcr": config.model.tcr_input_dim,
+            }
+            lengths = {
+                "peptide": config.model.peptide_max_length,
+                "hla": config.model.hla_max_length,
+                "tcr": config.model.tcr_max_length,
+            }
+            for entity in ("peptide", "hla", "tcr"):
+                with EmbeddingCacheWriter(
+                    cache_root,
+                    entity,
+                    hidden_dim=dimensions[entity],
+                    max_length=lengths[entity],
+                    model_metadata={
+                        "checkpoint_fingerprint": source.sha256,
+                        "dataset_fingerprint": audit.dataset_fingerprint,
+                    },
+                    chunk_rows=1,
+                ) as writer:
+                    writer.add_batch(
+                        [entity.upper()],
+                        np.zeros(
+                            (1, lengths[entity], dimensions[entity]),
+                            dtype=np.float16,
+                        ),
+                        np.ones((1, lengths[entity]), dtype=np.uint8),
+                        np.asarray([lengths[entity]], dtype=np.int16),
+                    )
+            manifests = list(cache_root.glob("*/manifest.json"))
+            before = {
+                path: (path.stat().st_mtime_ns, path.read_bytes())
+                for path in manifests
+            }
+
+            result = module.precompute_stage10_caches(
+                config,
+                source,
+                audit,
+                device=torch.device("cpu"),
+                overwrite=False,
+            )
+
+            self.assertEqual(result, cache_root)
+            self.assertEqual(
+                before,
+                {
+                    path: (path.stat().st_mtime_ns, path.read_bytes())
+                    for path in manifests
+                },
+            )
+
+    def test_bash_dispatcher_rejects_unknown_action_with_stable_usage(self):
+        script = self._project_root() / "run_stage10.sh"
+        if not script.is_file():
+            raise AssertionError("run_stage10.sh must exist")
+        result = subprocess.run(
+            ["bash", str(script), "not-an-action"],
+            cwd=self._project_root(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "audit|cache|train|ablations|evaluate|evaluate-tcr|export",
+            result.stderr,
+        )
 
 
 class Stage10EvaluationTests(unittest.TestCase):
