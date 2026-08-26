@@ -55,6 +55,34 @@ def build_stage8_optimizer(model, config: Stage8ExperimentConfig) -> torch.optim
 Stage8OnlinePhase = Literal["stage8a", "stage8b"]
 
 
+def validate_stage8_online_trainer_contract(
+    config: Stage8ExperimentConfig,
+) -> None:
+    """Reject schedule drift before constructing the online Stage-8 lifecycle."""
+
+    values = config.stage8
+    contract = {
+        "stage8a_epochs": 2,
+        "binary_replay_ratio": 0.25,
+        "peptide_unfrozen_layers": 2,
+        "hla_unfrozen_layers": 2,
+        "tcr_unfrozen_layers": 2,
+        "micro_batch_size": 4,
+        "gradient_accumulation_steps": 16,
+        "min_rounds": 5,
+        "max_rounds": 15,
+        "early_stopping_patience": 5,
+        "early_stopping_min_delta": 1e-4,
+        "constraint_ramp_epochs": 5,
+        "pht_score_weight": 0.4,
+        "phla_score_weight": 0.2,
+        "ptcr_score_weight": 0.4,
+    }
+    for name, expected in contract.items():
+        if getattr(values, name) != expected:
+            raise ValueError(f"stage8.{name} must equal {expected}")
+
+
 def build_stage8_online_optimizer(
     model,
     config: Stage8ExperimentConfig,
@@ -537,6 +565,7 @@ class Stage8OnlineTrainer:
         condition: Stage8Condition | str,
         tracker=None,
     ):
+        validate_stage8_online_trainer_contract(config)
         required = {"phla", "ptcr", "joint"}
         if set(train_loaders) != required:
             raise ValueError("Stage-8 online training requires phla, ptcr, and joint loaders")

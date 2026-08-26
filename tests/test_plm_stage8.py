@@ -942,6 +942,45 @@ class Stage8OnlineTrainingTests(unittest.TestCase):
             tcr_unfrozen_layers=2,
         )
 
+    def _static_model(self) -> ProgressiveStage8FineTuningModel:
+        """Concrete encoder fixture whose trainable blocks cannot alter outputs."""
+
+        import torch.nn as nn
+        from source.plm_unified.encoders import ResidueBatch
+
+        class StaticEncoder(nn.Module):
+            def __init__(self, hidden_size: int, name: str):
+                super().__init__()
+                self.hidden_size = hidden_size
+                self.checkpoint_fingerprint = f"static-{name}"
+                self.blocks = nn.ModuleList(
+                    nn.Linear(hidden_size, hidden_size) for _ in range(2)
+                )
+                self.requires_grad_(False)
+
+            def transformer_blocks(self):
+                return self.blocks
+
+            def set_active_training(self, active: bool):
+                self.train(active)
+
+            def forward(self, sequences):
+                return ResidueBatch(
+                    torch.zeros(len(sequences), 5, self.hidden_size),
+                    torch.ones(len(sequences), 5, dtype=torch.bool),
+                    torch.full((len(sequences),), 5, dtype=torch.long),
+                )
+
+        return ProgressiveStage8FineTuningModel(
+            Stage8BindingModel(self._model_config()),
+            StaticEncoder(8, "peptide"),
+            StaticEncoder(8, "hla"),
+            StaticEncoder(6, "tcr"),
+            peptide_unfrozen_layers=2,
+            hla_unfrozen_layers=2,
+            tcr_unfrozen_layers=2,
+        )
+
     def _config(self, root: Path) -> Stage8ExperimentConfig:
         config = Stage8ExperimentConfig(
             paths=Stage8Paths(root, root, root, root, root),
@@ -985,6 +1024,69 @@ class Stage8OnlineTrainingTests(unittest.TestCase):
         self.assertEqual(loss.hierarchy_lambda, 0.0)
         self.assertEqual(loss.pt_implication_lambda, 0.0)
         self.assertTrue(torch.equal(loss.total, loss.supervised))
+
+    def test_online_trainer_rejects_every_mutable_binding_schedule_value(self) -> None:
+        cases = {
+            "stage8a_epochs": 3,
+            "binary_replay_ratio": 0.5,
+            "peptide_unfrozen_layers": 1,
+            "hla_unfrozen_layers": 1,
+            "tcr_unfrozen_layers": 1,
+            "micro_batch_size": 8,
+            "gradient_accumulation_steps": 8,
+            "min_rounds": 4,
+            "max_rounds": 14,
+            "early_stopping_patience": 4,
+            "early_stopping_min_delta": 1e-3,
+            "constraint_ramp_epochs": 4,
+            "pht_score_weight": 0.5,
+            "phla_score_weight": 0.3,
+            "ptcr_score_weight": 0.3,
+        }
+        joint = _OnlineStage8Batches([self._joint_batch()], samples=4)
+        replay = _OnlineStage8Batches([self._replay_batch()], samples=4)
+        with tempfile.TemporaryDirectory() as temporary:
+            for field, invalid_value in cases.items():
+                with self.subTest(field=field):
+                    config = self._config(Path(temporary))
+                    setattr(config.stage8, field, invalid_value)
+                    with self.assertRaisesRegex(ValueError, f"stage8.{field}"):
+                        Stage8OnlineTrainer(
+                            self._model(),
+                            config,
+                            {"phla": replay, "ptcr": replay, "joint": joint},
+                            joint,
+                            condition=Stage8Condition.FULL,
+                        )
+
+    def test_stage8b_stops_after_five_non_improving_rounds(self) -> None:
+        joint = _OnlineStage8Batches([self._joint_batch()], samples=4)
+        replay = _OnlineStage8Batches([self._replay_batch()], samples=4)
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self._config(Path(temporary))
+            config.stage8.adapter_lr = 0.0
+            config.stage8.pretrained_attention_lr = 0.0
+            config.stage8.triplet_module_lr = 0.0
+            trainer = Stage8OnlineTrainer(
+                self._static_model(),
+                config,
+                {"phla": replay, "ptcr": replay, "joint": joint},
+                joint,
+                condition=Stage8Condition.FULL,
+            )
+            trainer.fit_stage8a()
+            trainer.fit_stage8b()
+
+        self.assertEqual(trainer.stage8b_round, 5)
+        self.assertEqual(trainer.bad_rounds, 5)
+        self.assertEqual(
+            trainer.pass_history[-15:],
+            [
+                ("stage8b", round_index, task)
+                for round_index in range(1, 6)
+                for task in ("phla", "ptcr", "joint")
+            ],
+        )
 
     def test_stage8b_round_index_ramps_constraints_through_round_five(self) -> None:
         logits = torch.tensor([[0.0, 3.0], [3.0, 0.0]], requires_grad=True)
