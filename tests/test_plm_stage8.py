@@ -1,0 +1,1151 @@
+"""Contract tests for the Stage-8 constrained four-type pipeline."""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import tempfile
+import unittest
+from collections import Counter
+from copy import deepcopy
+from pathlib import Path
+from types import SimpleNamespace
+
+import torch
+import numpy as np
+
+from source.plm_unified.config import ModelConfig
+from source.plm_unified.stage8_config import (
+    Stage8Condition,
+    Stage8ExperimentConfig,
+    Stage8Paths,
+    load_stage8_config,
+)
+from source.plm_unified.stage8_data import (
+    BalancedFourTypeBatchSampler,
+    CachedStage8Dataset,
+    Stage8CacheCollator,
+    Stage8DataError,
+    Stage8Record,
+    audit_stage8_data,
+    audit_stage8_class_dirs,
+    stage8_cache_hidden_dtype,
+)
+from source.plm_unified import stage8_data, stage8_model
+from source.plm_unified.stage8_checkpoint import (
+    Stage3Source, export_stage8_full_checkpoint, extract_stage8_binding_state,
+    load_stage3_source, load_torch_checkpoint,
+)
+from source.plm_unified.stage8_evaluation import stage8_joint_score
+from source.plm_unified.stage8_loss import compute_stage8_loss
+from source.plm_unified.stage8_model import Stage8BindingModel
+from source.plm_unified.stage8_trainer import Stage8Trainer, build_stage8_optimizer
+from source.plm_unified.cache import CacheLocator, EmbeddingCacheWriter
+
+
+HEADER = ["peptide", "tcr", "hla", "PH", "PT", "PHT"]
+
+
+def _write_csv(path: Path, rows: list[list[object]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(HEADER)
+        writer.writerows(rows)
+
+
+class Stage8ConfigTests(unittest.TestCase):
+    def test_defaults_encode_approved_stage8_design(self) -> None:
+        root = Path("/tmp/stage8-contract")
+        config = Stage8ExperimentConfig(
+            paths=Stage8Paths(
+                project_root=root,
+                data_root=root / "data",
+                cache_root=root / "cache",
+                output_root=root / "models",
+                swanlog_root=root / "logs",
+            )
+        )
+        config.validate()
+        self.assertEqual(config.runtime.fold, 1)
+        self.assertEqual(config.runtime.seed, 42)
+        self.assertEqual(config.stage8.data_mode, "pht_class_dirs")
+        self.assertEqual(config.stage8.data_subdir, "PHT/classes")
+        self.assertEqual(
+            tuple(config.stage8.class_dirs),
+            ("PHT_000", "PHT_010", "PHT_100", "PHT_111"),
+        )
+        self.assertEqual(
+            [path.name for path in config.train_paths()],
+            ["train.csv"] * 4,
+        )
+        self.assertEqual(config.stage8.batch_size, 256)
+        self.assertEqual(config.stage8.pht_loss_weight, 1.0)
+        self.assertEqual(config.stage8.phla_loss_weight, 0.3)
+        self.assertEqual(config.stage8.ptcr_loss_weight, 0.2)
+        self.assertEqual(config.stage8.constraint_margin, 0.05)
+        self.assertEqual(config.stage8.hierarchy_lambda, 0.05)
+        self.assertEqual(config.stage8.pt_implication_lambda, 0.03)
+        self.assertEqual(config.stage8.constraint_ramp_epochs, 5)
+        self.assertEqual(config.stage8.early_stopping_patience, 5)
+        self.assertEqual(config.stage8.selection_weights, (0.4, 0.2, 0.4))
+        self.assertEqual(config.stage8.conditions, tuple(Stage8Condition))
+        self.assertEqual(config.swanlab.mode, "online")
+
+    def test_v2_defaults_pin_the_exact_stage1_source_and_online_schedule(self) -> None:
+        root = Path("/tmp/stage8-v2-contract")
+        config = Stage8ExperimentConfig(
+            paths=Stage8Paths(root, root, root, root, root)
+        )
+
+        self.assertTrue(hasattr(config.paths, "stage1_checkpoint"))
+        if not hasattr(config.paths, "stage1_checkpoint"):
+            return
+        self.assertEqual(
+            config.paths.stage1_checkpoint,
+            Path(
+                "trained_model/PLM_Unified_PH_PT/fold_1/seed_42/best_round/"
+                "best_joint_20260824_174202_510837.pt"
+            ),
+        )
+        self.assertEqual(
+            config.paths.stage1_sha256,
+            "5cef56d3f5e392828d23659a53df20f7c8ec0f4678e5d639ec1b798ed02a5f96",
+        )
+        self.assertEqual(config.stage8.stage8a_epochs, 2)
+        self.assertEqual(config.stage8.micro_batch_size, 4)
+        self.assertEqual(config.stage8.gradient_accumulation_steps, 16)
+        self.assertEqual(config.stage8.binary_replay_ratio, 0.25)
+        self.assertEqual(config.stage8.peptide_unfrozen_layers, 2)
+        self.assertEqual(config.stage8.hla_unfrozen_layers, 2)
+        self.assertEqual(config.stage8.tcr_unfrozen_layers, 2)
+        self.assertEqual(config.stage8.min_rounds, 5)
+        self.assertEqual(config.stage8.max_rounds, 15)
+
+    def test_batch_size_must_split_equally_across_four_types(self) -> None:
+        root = Path("/tmp/stage8-contract")
+        config = Stage8ExperimentConfig(
+            paths=Stage8Paths(root, root, root, root, root)
+        )
+        config.stage8.batch_size = 258
+        with self.assertRaisesRegex(ValueError, "divisible by 4"):
+            config.validate()
+
+    def test_v2_binding_schedule_values_cannot_be_overridden(self) -> None:
+        root = Path("/tmp/stage8-v2-contract")
+        cases = {
+            "stage8a_epochs": 3,
+            "micro_batch_size": 8,
+            "gradient_accumulation_steps": 8,
+            "binary_replay_ratio": 0.5,
+            "peptide_unfrozen_layers": 1,
+            "hla_unfrozen_layers": 1,
+            "tcr_unfrozen_layers": 1,
+        }
+        for field, invalid_value in cases.items():
+            with self.subTest(field=field):
+                config = Stage8ExperimentConfig(
+                    paths=Stage8Paths(root, root, root, root, root)
+                )
+                setattr(config.stage8, field, invalid_value)
+                with self.assertRaisesRegex(ValueError, field):
+                    config.validate()
+
+    @staticmethod
+    def _required_stage8_files(root: Path) -> None:
+        for class_dir in ("PHT_000", "PHT_010", "PHT_100", "PHT_111"):
+            directory = root / "PHT" / "classes" / class_dir
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "train.csv").touch()
+            (directory / "val.csv").touch()
+
+    def test_require_files_accepts_stage1_source_without_stage3(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._required_stage8_files(root)
+            stage1 = root / "stage1.pt"
+            stage1.touch()
+            config = Stage8ExperimentConfig(
+                paths=Stage8Paths(
+                    root, root, root / "cache", root / "models", root / "logs",
+                    stage1_checkpoint=stage1,
+                    stage3_checkpoint=root / "missing-stage3.pt",
+                )
+            )
+
+            try:
+                config.validate(require_files=True)
+            except FileNotFoundError as exc:
+                self.fail(f"Stage8 must not require Stage3: {exc}")
+
+    def test_require_files_rejects_missing_stage1_even_if_stage3_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._required_stage8_files(root)
+            stage3 = root / "stage3.pt"
+            stage3.touch()
+            config = Stage8ExperimentConfig(
+                paths=Stage8Paths(
+                    root, root, root / "cache", root / "models", root / "logs",
+                    stage1_checkpoint=root / "missing-stage1.pt",
+                    stage3_checkpoint=stage3,
+                )
+            )
+
+            with self.assertRaisesRegex(FileNotFoundError, "Stage-1 checkpoint"):
+                config.validate(require_files=True)
+
+    def test_repository_stage8_yaml_enables_online_swanlab(self) -> None:
+        config = load_stage8_config(
+            Path(__file__).resolve().parents[1] / "configs" / "plm_stage8.yaml"
+        )
+        self.assertEqual(config.swanlab.mode, "online")
+        self.assertEqual(config.runtime.fold, 1)
+        self.assertEqual(config.runtime.seed, 42)
+        self.assertEqual(config.stage8.data_mode, "pht_class_dirs")
+        self.assertEqual(
+            tuple(config.stage8.class_dirs),
+            ("PHT_000", "PHT_010", "PHT_100", "PHT_111"),
+        )
+        self.assertEqual(
+            config.paths.stage3_checkpoint.name,
+            "stage3_best_joint_20260825_161220_330205.pt",
+        )
+        self.assertEqual(config.stage8.early_stopping_patience, 5)
+        self.assertEqual(config.stage8.selection_weights, (0.4, 0.2, 0.4))
+
+    def test_stage1_sha_is_loaded_as_metadata_not_a_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = Path(temporary) / "stage8.yaml"
+            config_path.write_text(
+                "paths:\n"
+                "  project_root: .\n"
+                "  data_root: data\n"
+                "  cache_root: cache\n"
+                "  output_root: models\n"
+                "  swanlog_root: logs\n"
+                "  stage1_sha256: "
+                "5cef56d3f5e392828d23659a53df20f7c8ec0f4678e5d639ec1b798ed02a5f96\n"
+            )
+            config = load_stage8_config(config_path)
+            self.assertEqual(
+                config.paths.stage1_sha256,
+                "5cef56d3f5e392828d23659a53df20f7c8ec0f4678e5d639ec1b798ed02a5f96",
+            )
+
+    def test_v1_rejects_non_fold1_seed42_or_incomplete_class_dirs(self) -> None:
+        root = Path("/tmp/stage8-contract")
+        config = Stage8ExperimentConfig(paths=Stage8Paths(root, root, root, root, root))
+        config.runtime.fold = 2
+        with self.assertRaisesRegex(ValueError, "fold=1"):
+            config.validate()
+        config.runtime.fold = 1
+        config.runtime.seed = 2026
+        with self.assertRaisesRegex(ValueError, "seed=42"):
+            config.validate()
+        config.runtime.seed = 42
+        config.stage8.class_dirs = ["PHT_000", "PHT_111"]
+        with self.assertRaisesRegex(ValueError, "four class directories"):
+            config.validate()
+
+
+class Stage8DataTests(unittest.TestCase):
+    @staticmethod
+    def _write_class_csv(
+        path: Path,
+        class_code: str,
+        rows: list[tuple[str, str, str]],
+        split_type: str,
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        header = [
+            "peptide", "HLA", "tcr", "PH", "PT", "PHT",
+            "class_code", "split_type", "source_file",
+        ]
+        labels = tuple(int(value) for value in class_code)
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(header)
+            for peptide, hla, tcr in rows:
+                writer.writerow([
+                    peptide, hla, tcr, *labels, class_code,
+                    split_type, path.name,
+                ])
+
+    @staticmethod
+    def _write_four_class_dataset(root: Path) -> None:
+        rows = {
+            "000": [("AAAAAAAA", "Y" * 34, "CASSAAAA")],
+            "010": [("CCCCCCCC", "F" * 34, "CASSCCCC")],
+            "100": [("EEEEEEEE", "G" * 34, "CASSEEEE")],
+            "111": [("GGGGGGGG", "H" * 34, "CASSGGGG")],
+        }
+        for class_code, class_rows in rows.items():
+            class_dir = root / f"PHT_{class_code}"
+            Stage8DataTests._write_class_csv(
+                class_dir / "train.csv", class_code, class_rows, "train"
+            )
+            val_rows = [
+                (peptide.replace("A", "T").replace("C", "T").replace("E", "T").replace("G", "T"), hla, tcr)
+                for peptide, hla, tcr in class_rows
+            ]
+            Stage8DataTests._write_class_csv(
+                class_dir / "val.csv", class_code, val_rows, "val_unseen_triple"
+            )
+
+    def test_audit_stage8_class_dirs_normalises_hla_and_merges_four_types(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_four_class_dataset(root)
+            result = audit_stage8_class_dirs(
+                root,
+                ["PHT_000", "PHT_010", "PHT_100", "PHT_111"],
+                "train.csv",
+                "val.csv",
+                ModelConfig(),
+            )
+            result.require_clean()
+            self.assertEqual(len(result.train_records), 4)
+            self.assertEqual(len(result.val_records), 4)
+            self.assertEqual(
+                result.report["label_type_counts"]["train"],
+                {"111": 1, "100": 1, "010": 1, "000": 1},
+            )
+            self.assertEqual(
+                result.report["source_files"]["train"],
+                {"PHT_000": 1, "PHT_010": 1, "PHT_100": 1, "PHT_111": 1},
+            )
+            self.assertEqual(result.train_records[0].hla, "Y" * 34)
+
+    def test_audit_stage8_class_dirs_rejects_class_code_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_four_class_dataset(root)
+            mismatch = root / "PHT_010" / "train.csv"
+            rows = [("CCCCCCCC", "F" * 34, "CASSCCCC")]
+            self._write_class_csv(mismatch, "111", rows, "train")
+            result = audit_stage8_class_dirs(
+                root,
+                ["PHT_000", "PHT_010", "PHT_100", "PHT_111"],
+                "train.csv",
+                "val.csv",
+                ModelConfig(),
+            )
+            self.assertTrue(result.has_errors)
+            self.assertTrue(any("class_code" in item["reason"] for item in result.errors))
+
+    def test_audit_stage8_class_dirs_detects_cross_directory_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_four_class_dataset(root)
+            shared = [("AAAAAAAA", "Y" * 34, "CASSAAAA")]
+            self._write_class_csv(root / "PHT_111" / "train.csv", "111", shared, "train")
+            result = audit_stage8_class_dirs(
+                root,
+                ["PHT_000", "PHT_010", "PHT_100", "PHT_111"],
+                "train.csv",
+                "val.csv",
+                ModelConfig(),
+            )
+            self.assertTrue(result.has_conflicts)
+            with self.assertRaises(Stage8DataError):
+                result.require_clean()
+
+    def test_audit_stage8_class_dirs_removes_same_label_train_val_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_four_class_dataset(root)
+            shared = [("AAAAAAAA", "Y" * 34, "CASSAAAA")]
+            val_rows = [
+                ("TTTTTTTT", "Y" * 34, "CASSAAAA"),
+                *shared,
+            ]
+            self._write_class_csv(
+                root / "PHT_000" / "val.csv", "000", val_rows, "val"
+            )
+            result = audit_stage8_class_dirs(
+                root,
+                ["PHT_000", "PHT_010", "PHT_100", "PHT_111"],
+                "train.csv",
+                "val.csv",
+                ModelConfig(),
+            )
+            result.require_clean()
+            self.assertEqual(result.report["validation"]["train_overlap_removed"], 1)
+            self.assertEqual(len(result.val_records), 4)
+
+    def test_audit_deduplicates_same_label_and_removes_val_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            train = root / "train.csv"
+            val = root / "val.csv"
+            shared = ["AAAAAAAA", "CASSLGQETQYF", "Y" * 34, 1, 1, 1]
+            _write_csv(
+                train,
+                [
+                    shared,
+                    shared,
+                    ["CCCCCCCC", "CASSIRSSYEQYF", "A" * 34, 1, 0, 0],
+                    ["EEEEEEEE", "CASSQETQYF", "C" * 34, 0, 1, 0],
+                    ["FFFFFFFF", "CASSPGQETQYF", "D" * 34, 0, 0, 0],
+                ],
+            )
+            _write_csv(
+                val,
+                [
+                    shared,
+                    ["DDDDDDDD", "CASSQETQYF", "C" * 34, 0, 1, 0],
+                    ["GGGGGGGG", "CASSLGQETQYF", "E" * 34, 1, 1, 1],
+                    ["HHHHHHHH", "CASSIRSSYEQYF", "F" * 34, 1, 0, 0],
+                    ["IIIIIIII", "CASSIRSSYEQYF", "G" * 34, 0, 0, 0],
+                ],
+            )
+            result = audit_stage8_data(train, val, ModelConfig())
+            result.require_clean()
+            self.assertEqual(len(result.train_records), 4)
+            self.assertEqual(len(result.val_records), 4)
+            self.assertEqual(result.report["train"]["same_label_duplicates"], 1)
+            self.assertEqual(result.report["validation"]["train_overlap_removed"], 1)
+            self.assertTrue(result.dataset_fingerprint)
+
+    def test_conflicting_labels_are_reported_and_stop_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            train = root / "train.csv"
+            val = root / "val.csv"
+            key = ["AAAAAAAA", "CASSLGQETQYF", "Y" * 34]
+            _write_csv(train, [key + [1, 1, 1], key + [1, 0, 0]])
+            _write_csv(val, [["CCCCCCCC", "CASSIRSSYEQYF", "A" * 34, 0, 0, 0]])
+            result = audit_stage8_data(train, val, ModelConfig())
+            self.assertTrue(result.has_conflicts)
+            self.assertEqual(len(result.conflicts), 1)
+            with self.assertRaises(Stage8DataError):
+                result.require_clean()
+
+    def test_only_four_logically_supported_label_types_are_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            train = root / "train.csv"
+            val = root / "val.csv"
+            _write_csv(train, [["AAAAAAAA", "CASSLGQETQYF", "Y" * 34, 0, 0, 1]])
+            _write_csv(val, [["CCCCCCCC", "CASSIRSSYEQYF", "A" * 34, 0, 0, 0]])
+            result = audit_stage8_data(train, val, ModelConfig())
+            self.assertTrue(result.has_errors)
+            with self.assertRaisesRegex(Stage8DataError, "manual repair"):
+                result.require_clean()
+
+    def test_balanced_sampler_is_deterministic_and_oversamples_minor_types(self) -> None:
+        type_indices = {"111": [0, 1, 2], "100": [3], "010": [4, 5], "000": [6]}
+        sampler = BalancedFourTypeBatchSampler(type_indices, batch_size=8, seed=17)
+        first = list(iter(sampler))
+        sampler.set_epoch(0)
+        self.assertEqual(first, list(iter(sampler)))
+        self.assertEqual(len(first), 2)
+        index_to_type = {
+            index: label_type
+            for label_type, indices in type_indices.items()
+            for index in indices
+        }
+        for batch in first:
+            self.assertEqual(Counter(index_to_type[index] for index in batch), {
+                "111": 2, "100": 2, "010": 2, "000": 2,
+            })
+
+    def test_online_loaders_keep_ph_pt_replay_and_four_type_joint_batches(self) -> None:
+        make_loaders = getattr(stage8_data, "make_stage8_online_loaders", None)
+        self.assertIsNotNone(make_loaders)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_four_class_dataset(root)
+            audit = audit_stage8_class_dirs(
+                root,
+                ["PHT_000", "PHT_010", "PHT_100", "PHT_111"],
+                "train.csv",
+                "val.csv",
+                ModelConfig(),
+            )
+            phla_path = root / "phla.csv"
+            ptcr_path = root / "ptcr.csv"
+            with phla_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["peptide", "HLA", "label"])
+                writer.writerows([["AAAAAAAA", "Y" * 34, 1], ["CCCCCCCC", "F" * 34, 0]])
+            with ptcr_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["peptide", "tcr", "label"])
+                writer.writerows([["AAAAAAAA", "CASSAAAA", 1], ["CCCCCCCC", "CASSCCCC", 0]])
+
+            train, validation = make_loaders(
+                audit,
+                phla_path=phla_path,
+                ptcr_path=ptcr_path,
+                model=ModelConfig(),
+                micro_batch_size=4,
+                eval_batch_size=4,
+                seed=17,
+                num_workers=0,
+                limit_per_type=1,
+            )
+            self.assertEqual(set(train), {"phla", "ptcr", "joint"})
+            self.assertEqual(next(iter(train["phla"]))["labels"].tolist(), [0, 1])
+            self.assertEqual(next(iter(train["ptcr"]))["labels"].tolist(), [1, 0])
+            self.assertEqual(
+                Counter(next(iter(train["joint"]))["label_types"]),
+                {"111": 1, "100": 1, "010": 1, "000": 1},
+            )
+            self.assertEqual(len(next(iter(validation))["label_types"]), 4)
+
+    def test_online_loader_requires_full_audit_before_applying_debug_limit(self) -> None:
+        make_loaders = getattr(stage8_data, "make_stage8_online_loaders", None)
+        self.assertIsNotNone(make_loaders)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_four_class_dataset(root)
+            audit = audit_stage8_class_dirs(
+                root,
+                ["PHT_000", "PHT_010", "PHT_100", "PHT_111"],
+                "train.csv",
+                "val.csv",
+                ModelConfig(),
+            )
+            audit.errors.append({"reason": "required label type 010 is absent"})
+            with self.assertRaisesRegex(Stage8DataError, "manual repair"):
+                make_loaders(
+                    audit,
+                    phla_path=root / "missing-phla.csv",
+                    ptcr_path=root / "missing-ptcr.csv",
+                    model=ModelConfig(),
+                    micro_batch_size=4,
+                    eval_batch_size=4,
+                    seed=17,
+                    num_workers=0,
+                    limit_per_type=1,
+                )
+
+
+class Stage8ModelAndLossTests(unittest.TestCase):
+    @staticmethod
+    def _model_config() -> ModelConfig:
+        return ModelConfig(
+            peptide_input_dim=8,
+            hla_input_dim=8,
+            tcr_input_dim=6,
+            adapter_hidden_dim=8,
+            model_dim=8,
+            num_attention_heads=2,
+            feedforward_dim=16,
+            adapter_dropout=0.0,
+            attention_dropout=0.0,
+            classifier_dropout=0.0,
+            peptide_min_length=1,
+            peptide_max_length=5,
+            hla_max_length=7,
+            tcr_max_length=6,
+        )
+
+    def test_forward_all_returns_three_heads_and_reuses_phla_attention(self) -> None:
+        torch.manual_seed(7)
+        model = Stage8BindingModel(self._model_config()).eval()
+        calls = 0
+
+        def count_call(_module, _args, _output):
+            nonlocal calls
+            calls += 1
+
+        hook = model.phla_cross_attention.register_forward_hook(count_call)
+        output = model.forward_all(
+            torch.randn(3, 5, 8), torch.ones(3, 5, dtype=torch.bool),
+            torch.randn(3, 7, 8), torch.ones(3, 7, dtype=torch.bool),
+            torch.randn(3, 6, 6), torch.ones(3, 6, dtype=torch.bool),
+        )
+        hook.remove()
+        self.assertEqual(calls, 1)
+        self.assertEqual(output.phla_logits.shape, (3, 2))
+        self.assertEqual(output.ptcr_logits.shape, (3, 2))
+        self.assertEqual(output.pht_logits.shape, (3, 2))
+
+    @staticmethod
+    def _tiny_encoder(hidden_size: int, name: str):
+        import torch.nn as nn
+        from source.plm_unified.encoders import ResidueBatch
+
+        class TinyEncoder(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.hidden_size = hidden_size
+                self.checkpoint_fingerprint = f"fingerprint-{name}"
+                self.blocks = nn.ModuleList(
+                    nn.Linear(hidden_size, hidden_size) for _ in range(3)
+                )
+                self.requires_grad_(False)
+
+            def transformer_blocks(self):
+                return self.blocks
+
+            def set_active_training(self, active: bool):
+                self.train(active)
+
+            def metadata(self):
+                return {
+                    "checkpoint_fingerprint": self.checkpoint_fingerprint,
+                    "hidden_size": self.hidden_size,
+                }
+
+            def forward(self, sequences):
+                hidden = torch.zeros(len(sequences), 5, hidden_size)
+                mask = torch.ones(len(sequences), 5, dtype=torch.bool)
+                lengths = torch.full((len(sequences),), 5, dtype=torch.long)
+                for block in self.blocks:
+                    hidden = block(hidden)
+                return ResidueBatch(hidden, mask, lengths)
+
+        return TinyEncoder()
+
+    def test_online_model_copies_ptcr_modules_and_switches_phase_trainability(self) -> None:
+        progressive_type = getattr(
+            stage8_model, "ProgressiveStage8FineTuningModel", None
+        )
+        self.assertIsNotNone(progressive_type)
+        binding = Stage8BindingModel(self._model_config())
+        with torch.no_grad():
+            binding.ptcr_classifier.network[-1].weight.fill_(3.0)
+        model = progressive_type(
+            binding,
+            self._tiny_encoder(8, "peptide"),
+            self._tiny_encoder(8, "hla"),
+            self._tiny_encoder(6, "tcr"),
+            peptide_unfrozen_layers=2,
+            hla_unfrozen_layers=2,
+            tcr_unfrozen_layers=2,
+        )
+
+        model.initialise_triplet_from_ptcr()
+        torch.testing.assert_close(
+            model.binding_model.triplet_classifier.network[-1].weight,
+            model.binding_model.ptcr_classifier.network[-1].weight,
+        )
+        model.set_trainable_stage8("joint", "stage8a")
+        self.assertTrue(all(
+            parameter.requires_grad
+            for parameter in model.binding_model.triplet_classifier.parameters()
+        ))
+        self.assertFalse(any(
+            parameter.requires_grad for parameter in model.peptide_encoder.parameters()
+        ))
+        self.assertFalse(any(
+            parameter.requires_grad for parameter in model.binding_model.ptcr_classifier.parameters()
+        ))
+        model.set_trainable_stage8("joint", "stage8b")
+        self.assertTrue(all(
+            parameter.requires_grad
+            for encoder in (model.peptide_encoder, model.hla_encoder, model.tcr_encoder)
+            for block in encoder.transformer_blocks()[-2:]
+            for parameter in block.parameters()
+        ))
+        self.assertTrue(all(
+            parameter.requires_grad
+            for parameter in model.binding_model.phla_classifier.parameters()
+        ))
+
+    def test_stage1_initialisation_exactly_copies_all_ptcr_modules(self) -> None:
+        initialise = getattr(stage8_model, "initialise_stage8_from_stage1", None)
+        self.assertIsNotNone(initialise)
+        from source.plm_unified.model import UnifiedBindingModel
+
+        model_config = self._model_config()
+        source = UnifiedBindingModel(model_config)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "stage1_best_joint.pt"
+            checkpoint = {
+                "format_version": 3,
+                "checkpoint_type": "stage1_joint_model",
+                "stage": "stage1b",
+                "model_scope": "joint_heads",
+                "model": source.state_dict(),
+                "config": {
+                    "model": model_config.__dict__,
+                    "training": {"fold": 1, "seed": 42},
+                },
+                "cache_metadata": {
+                    entity: {"model": {"checkpoint_fingerprint": f"fingerprint-{entity}"}}
+                    for entity in ("peptide", "hla", "tcr")
+                },
+            }
+            torch.save(checkpoint, path)
+            expected_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+            target = SimpleNamespace(
+                binding_model=Stage8BindingModel(model_config),
+                encoder_metadata=lambda: {
+                    entity: {"checkpoint_fingerprint": f"fingerprint-{entity}"}
+                    for entity in ("peptide", "hla", "tcr")
+                },
+            )
+            metadata = initialise(
+                target,
+                path,
+                model_config=model_config,
+                fold=1,
+                seed=42,
+                expected_sha256=expected_sha256,
+            )
+            self.assertEqual(metadata["kind"], "stage1")
+            self.assertEqual(metadata["sha256"], expected_sha256)
+            for triplet_name, ptcr_name in (
+                ("triplet_cross_attention", "ptcr_cross_attention"),
+                ("triplet_pooling", "ptcr_pooling"),
+                ("triplet_classifier", "ptcr_classifier"),
+            ):
+                triplet_state = getattr(target.binding_model, triplet_name).state_dict()
+                ptcr_state = getattr(source, ptcr_name).state_dict()
+                self.assertEqual(set(triplet_state), set(ptcr_state))
+                for name, value in ptcr_state.items():
+                    torch.testing.assert_close(triplet_state[name], value)
+
+    def test_stage1_initialisation_requires_exact_sha(self) -> None:
+        initialise = getattr(stage8_model, "initialise_stage8_from_stage1", None)
+        self.assertIsNotNone(initialise)
+        from source.plm_unified.model import UnifiedBindingModel
+
+        model_config = self._model_config()
+        source = UnifiedBindingModel(model_config)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "stage1_best_joint.pt"
+            checkpoint = {
+                "format_version": 3,
+                "checkpoint_type": "stage1_joint_model",
+                "stage": "stage1b",
+                "model_scope": "joint_heads",
+                "model": source.state_dict(),
+                "config": {
+                    "model": model_config.__dict__,
+                    "training": {"fold": 1, "seed": 42},
+                },
+                "cache_metadata": {
+                    entity: {"model": {"checkpoint_fingerprint": f"fingerprint-{entity}"}}
+                    for entity in ("peptide", "hla", "tcr")
+                },
+            }
+            torch.save(checkpoint, path)
+            target = SimpleNamespace(
+                binding_model=Stage8BindingModel(model_config),
+                encoder_metadata=lambda: {
+                    entity: {"checkpoint_fingerprint": f"fingerprint-{entity}"}
+                    for entity in ("peptide", "hla", "tcr")
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "expected SHA256 is required"):
+                initialise(
+                    target,
+                    path,
+                    model_config=model_config,
+                    fold=1,
+                    seed=42,
+                    expected_sha256=None,
+                )
+            with self.assertRaisesRegex(ValueError, "SHA256"):
+                initialise(
+                    target, path, model_config=model_config, fold=1, seed=42,
+                    expected_sha256="0" * 64,
+                )
+            checkpoint["config"] = {
+                **checkpoint["config"], "training": {"fold": 2, "seed": 42}
+            }
+            torch.save(checkpoint, path)
+            with self.assertRaisesRegex(ValueError, "fold"):
+                initialise(
+                    target,
+                    path,
+                    model_config=model_config,
+                    fold=1,
+                    seed=42,
+                    expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                )
+
+    def test_condition_switches_and_linear_ramp(self) -> None:
+        logits = torch.tensor([[0.0, 2.0], [2.0, 0.0]] * 2, requires_grad=True)
+        labels = torch.tensor([1, 0, 1, 0])
+        label_types = ["111", "000", "100", "010"]
+        baseline = compute_stage8_loss(
+            logits, logits, logits, labels, labels, labels, label_types,
+            condition=Stage8Condition.BASELINE, epoch=3,
+        )
+        full = compute_stage8_loss(
+            logits, logits, logits, labels, labels, labels, label_types,
+            condition=Stage8Condition.FULL, epoch=3,
+        )
+        self.assertEqual(baseline.hierarchy_lambda, 0.0)
+        self.assertEqual(baseline.pt_implication_lambda, 0.0)
+        self.assertAlmostEqual(full.hierarchy_lambda, 0.03)
+        self.assertAlmostEqual(full.pt_implication_lambda, 0.018)
+
+    def test_positive_hierarchy_constraint_does_not_backpropagate_into_pht(self) -> None:
+        phla = torch.tensor([[4.0, 0.0]], requires_grad=True)
+        ptcr = torch.tensor([[0.0, 4.0]], requires_grad=True)
+        pht = torch.tensor([[0.0, 4.0]], requires_grad=True)
+        labels = torch.tensor([1])
+        result = compute_stage8_loss(
+            phla, ptcr, pht, labels, labels, labels, ["111"],
+            condition=Stage8Condition.HIER_ONLY, epoch=5,
+            supervised_weight=0.0,
+        )
+        result.total.backward()
+        self.assertGreater(float(phla.grad.abs().sum()), 0.0)
+        self.assertEqual(float(pht.grad.abs().sum()), 0.0)
+
+    def test_negative_hierarchy_constraint_does_not_backpropagate_into_ph(self) -> None:
+        phla = torch.tensor([[4.0, 0.0]], requires_grad=True)
+        ptcr = torch.tensor([[4.0, 0.0]], requires_grad=True)
+        pht = torch.tensor([[0.0, 4.0]], requires_grad=True)
+        labels = torch.tensor([0])
+        result = compute_stage8_loss(
+            phla, ptcr, pht, labels, labels, labels, ["010"],
+            condition=Stage8Condition.HIER_ONLY, epoch=5,
+            supervised_weight=0.0,
+        )
+        result.total.backward()
+        self.assertEqual(float(phla.grad.abs().sum()), 0.0)
+        self.assertGreater(float(pht.grad.abs().sum()), 0.0)
+
+    def test_pt_constraints_use_the_same_directed_stop_gradient(self) -> None:
+        labels = torch.tensor([1])
+        phla = torch.tensor([[0.0, 4.0]], requires_grad=True)
+        ptcr = torch.tensor([[4.0, 0.0]], requires_grad=True)
+        pht = torch.tensor([[0.0, 4.0]], requires_grad=True)
+        positive = compute_stage8_loss(
+            phla, ptcr, pht, labels, labels, labels, ["111"],
+            condition=Stage8Condition.PT_IMP_ONLY, epoch=5,
+            supervised_weight=0.0,
+        )
+        positive.total.backward()
+        self.assertGreater(float(ptcr.grad.abs().sum()), 0.0)
+        self.assertEqual(float(pht.grad.abs().sum()), 0.0)
+
+        phla = torch.tensor([[4.0, 0.0]], requires_grad=True)
+        ptcr = torch.tensor([[4.0, 0.0]], requires_grad=True)
+        pht = torch.tensor([[0.0, 4.0]], requires_grad=True)
+        zero = torch.tensor([0])
+        negative = compute_stage8_loss(
+            phla, ptcr, pht, zero, zero, zero, ["100"],
+            condition=Stage8Condition.PT_IMP_ONLY, epoch=5,
+            supervised_weight=0.0,
+        )
+        negative.total.backward()
+        self.assertEqual(float(ptcr.grad.abs().sum()), 0.0)
+        self.assertGreater(float(pht.grad.abs().sum()), 0.0)
+
+    def test_pht_supervision_balances_positive_and_combined_negatives(self) -> None:
+        phla = torch.zeros(4, 2, requires_grad=True)
+        ptcr = torch.zeros(4, 2, requires_grad=True)
+        pht = torch.tensor(
+            [[0.0, 2.0], [2.0, 0.0], [0.5, 0.0], [0.0, 0.5]],
+            requires_grad=True,
+        )
+        labels = torch.tensor([1, 0, 0, 0])
+        result = compute_stage8_loss(
+            phla, ptcr, pht,
+            torch.tensor([1, 0, 1, 0]),
+            torch.tensor([1, 0, 0, 1]),
+            labels,
+            ["111", "000", "100", "010"],
+            condition=Stage8Condition.BASELINE,
+            epoch=0,
+        )
+        per_row = torch.nn.functional.cross_entropy(pht, labels, reduction="none")
+        expected = 0.5 * per_row[0] + 0.5 * per_row[1:].mean()
+        self.assertTrue(torch.allclose(result.pht, expected))
+
+    def test_optimizer_has_approved_three_learning_rate_groups(self) -> None:
+        model = Stage8BindingModel(self._model_config())
+        root = Path("/tmp/stage8-contract")
+        config = Stage8ExperimentConfig(
+            paths=Stage8Paths(root, root, root, root, root), model=self._model_config()
+        )
+        optimizer = build_stage8_optimizer(model, config)
+        self.assertEqual(
+            {group["name"]: group["lr"] for group in optimizer.param_groups},
+            {
+                "adapters": 2.5e-5,
+                "pretrained_attention": 5e-5,
+                "triplet_modules": 1e-4,
+            },
+        )
+        parameter_ids = [
+            id(parameter)
+            for group in optimizer.param_groups
+            for parameter in group["params"]
+        ]
+        self.assertEqual(len(parameter_ids), len(set(parameter_ids)))
+        self.assertEqual(set(parameter_ids), {id(parameter) for parameter in model.parameters()})
+
+    def test_joint_score_uses_only_predictive_metrics(self) -> None:
+        metrics = {
+            "pht": {
+                "auroc": 0.8, "accuracy": 0.7, "mcc": 0.6,
+                "f1": 0.5, "aupr": 0.4,
+            },
+            "phla": {
+                "auroc": 0.7, "accuracy": 0.6, "mcc": 0.5,
+                "f1": 0.4, "aupr": 0.3,
+            },
+            "ptcr": {
+                "auroc": 0.9, "accuracy": 0.8, "mcc": 0.7,
+                "f1": 0.6, "aupr": 0.5,
+            },
+            "violations": {"overall": 1.0},
+        }
+        self.assertAlmostEqual(stage8_joint_score(metrics), 0.62)
+
+
+class _FakeCache:
+    def __init__(self, width: int, dim: int):
+        self.width = width
+        self.dim = dim
+
+    def resolve(self, sequence: str) -> CacheLocator:
+        return CacheLocator(0, len(sequence), min(len(sequence), self.width))
+
+    def get_many(self, locators):
+        import numpy as np
+
+        hidden = np.zeros((len(locators), self.width, self.dim), dtype=np.float16)
+        mask = np.zeros((len(locators), self.width), dtype=np.bool_)
+        for index, locator in enumerate(locators):
+            hidden[index, :, :] = locator.row
+            mask[index, : locator.length] = True
+        return hidden, mask
+
+
+class Stage8CacheAndCheckpointTests(unittest.TestCase):
+    def test_cache_hidden_dtype_requires_active_cuda_autocast(self) -> None:
+        self.assertEqual(
+            stage8_cache_hidden_dtype(torch.device("cuda"), "none"),
+            torch.float32,
+        )
+        self.assertEqual(
+            stage8_cache_hidden_dtype(torch.device("cuda"), "bf16"),
+            torch.float16,
+        )
+        self.assertEqual(
+            stage8_cache_hidden_dtype(torch.device("cpu"), "bf16"),
+            torch.float32,
+        )
+    def test_stage8_cache_writer_supports_row_sized_random_access_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with EmbeddingCacheWriter(
+                root, "peptide", hidden_dim=2, max_length=3,
+                model_metadata={"checkpoint_fingerprint": "sha"},
+                shard_size=8, chunk_rows=1,
+            ) as writer:
+                writer.add_batch(
+                    ["AAA", "CCC"],
+                    np.zeros((2, 3, 2), dtype=np.float16),
+                    np.ones((2, 3), dtype=np.uint8),
+                    np.asarray([3, 3], dtype=np.int16),
+                )
+            import h5py
+
+            with h5py.File(root / "peptide/shards/part-00000.h5", "r") as handle:
+                self.assertEqual(handle["hidden"].chunks[0], 1)
+            import json
+
+            manifest = json.loads((root / "peptide/manifest.json").read_text())
+            self.assertEqual(manifest["chunk_rows"], 1)
+
+    def test_cached_dataset_and_collator_keep_labels_types_and_rows(self) -> None:
+        records = [
+            Stage8Record("AAAAAAAA", "CCCC", "D" * 10, 1, 1, 1, 12),
+            Stage8Record("EEEEEEEE", "FFFF", "G" * 10, 1, 0, 0, 21),
+        ]
+        caches = {
+            "peptide": _FakeCache(8, 3),
+            "hla": _FakeCache(10, 3),
+            "tcr": _FakeCache(6, 2),
+        }
+        dataset = CachedStage8Dataset(records, caches)
+        batch = Stage8CacheCollator(caches)([dataset[0], dataset[1]])
+        self.assertEqual(batch["peptide_hidden"].shape, (2, 8, 3))
+        self.assertEqual(batch["hla_hidden"].shape, (2, 10, 3))
+        self.assertEqual(batch["tcr_hidden"].shape, (2, 6, 2))
+        self.assertEqual(batch["ph_labels"].tolist(), [1, 1])
+        self.assertEqual(batch["pt_labels"].tolist(), [1, 0])
+        self.assertEqual(batch["pht_labels"].tolist(), [1, 0])
+        self.assertEqual(batch["label_types"], ["111", "100"])
+        self.assertEqual(batch["source_rows"].tolist(), [12, 21])
+
+    def test_stage3_source_validation_extracts_only_binding_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model_config = Stage8ModelAndLossTests._model_config()
+            binding = Stage8BindingModel(model_config)
+            path = root / "source.pt"
+            state = {f"binding_model.{name}": value for name, value in binding.state_dict().items()}
+            state.update({
+                "peptide_encoder.dummy": torch.tensor(1),
+                "hla_encoder.dummy": torch.tensor(1),
+                "tcr_encoder.dummy": torch.tensor(1),
+            })
+            torch.save({
+                "format_version": 1,
+                "checkpoint_type": "stage3_multitask_model",
+                "tasks": ["phla", "ptcr", "triplet"],
+                "config": {"model": model_config.__dict__, "training": {"fold": 4, "seed": 2026}},
+                "initialization_source": {"kind": "stage1", "source_fold": 4, "source_seed": 2026},
+                "model": state,
+            }, path)
+            config = Stage8ExperimentConfig(
+                paths=Stage8Paths(root, root, root, root, root, stage3_checkpoint=path),
+                model=model_config,
+            )
+            config.runtime.fold = 4
+            config.runtime.seed = 2026
+            source = load_stage3_source(config)
+            self.assertEqual(set(source.binding_state), set(binding.state_dict()))
+            self.assertEqual(len(source.sha256), 64)
+            self.assertEqual(source.lineage["kind"], "stage3")
+
+    def test_stage3_joint_checkpoint_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model_config = Stage8ModelAndLossTests._model_config()
+            binding = Stage8BindingModel(model_config)
+            path = root / "stage3_joint.pt"
+            state = {
+                f"binding_model.{name}": value
+                for name, value in binding.state_dict().items()
+            }
+            state.update({
+                "peptide_encoder.dummy": torch.tensor(1),
+                "hla_encoder.dummy": torch.tensor(1),
+                "tcr_encoder.dummy": torch.tensor(1),
+            })
+            torch.save({
+                "format_version": 1,
+                "checkpoint_type": "stage3_joint_model",
+                "config": {
+                    "model": model_config.__dict__,
+                    "training": {"fold": 1, "seed": 42},
+                },
+                "initialization_source": {
+                    "kind": "stage1", "source_fold": 1, "source_seed": 42,
+                },
+                "model": state,
+            }, path)
+            config = Stage8ExperimentConfig(
+                paths=Stage8Paths(
+                    root, root, root, root, root,
+                    stage3_checkpoint=path,
+                ),
+                model=model_config,
+            )
+            config.runtime.fold = 1
+            config.runtime.seed = 42
+            source = load_stage3_source(config)
+            self.assertEqual(source.checkpoint["checkpoint_type"], "stage3_joint_model")
+            self.assertEqual(set(source.binding_state), set(binding.state_dict()))
+
+    def test_one_epoch_cpu_training_writes_lean_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model_config = Stage8ModelAndLossTests._model_config()
+            config = Stage8ExperimentConfig(
+                paths=Stage8Paths(root, root, root, root / "models", root / "logs"),
+                model=model_config,
+            )
+            config.stage8.batch_size = 4
+            config.stage8.eval_batch_size = 4
+            config.stage8.max_epochs = 1
+            config.stage8.min_epochs = 1
+            config.stage8.early_stopping_patience = 1
+            config.stage8.mixed_precision = "none"
+            config.validate()
+            torch.manual_seed(11)
+            batch = {
+                "peptide_hidden": torch.randn(4, 5, 8),
+                "peptide_mask": torch.ones(4, 5, dtype=torch.bool),
+                "hla_hidden": torch.randn(4, 7, 8),
+                "hla_mask": torch.ones(4, 7, dtype=torch.bool),
+                "tcr_hidden": torch.randn(4, 6, 6),
+                "tcr_mask": torch.ones(4, 6, dtype=torch.bool),
+                "ph_labels": torch.tensor([1, 1, 0, 0]),
+                "pt_labels": torch.tensor([1, 0, 1, 0]),
+                "pht_labels": torch.tensor([1, 0, 0, 0]),
+                "label_types": ["111", "100", "010", "000"],
+                "source_rows": torch.tensor([2, 3, 4, 5]),
+            }
+            source = Stage3Source(
+                root / "stage3.pt", "a" * 64, {}, {},
+                {"kind": "stage3", "sha256": "a" * 64},
+            )
+            initial_model = Stage8BindingModel(model_config)
+            source_binding_state = deepcopy(initial_model.state_dict())
+            trainer = Stage8Trainer(
+                initial_model, config, [batch], [batch],
+                condition=Stage8Condition.FULL, source=source,
+                data_audit={"dataset_fingerprint": "data-sha"},
+                run_timestamp="20260809_000000_000001",
+            )
+            summary = trainer.fit()
+            self.assertTrue(Path(summary["best_checkpoint"]).is_file())
+            self.assertTrue(Path(summary["last_checkpoint"]).is_file())
+            self.assertTrue(trainer.summary_path.is_file())
+            self.assertTrue(trainer.prediction_path.is_file())
+            checkpoint = load_torch_checkpoint(summary["best_checkpoint"], mmap=False)
+            self.assertEqual(checkpoint["checkpoint_type"], "stage8_binding_model")
+            self.assertFalse(any(name.startswith("peptide_encoder.") for name in checkpoint["model"]))
+            self.assertEqual(checkpoint["source_stage3"]["sha256"], "a" * 64)
+            self.assertIsInstance(checkpoint["best_model"], dict)
+
+            source.checkpoint = {
+                "model": {
+                    "peptide_encoder.weight": torch.tensor([1.0]),
+                    "binding_model.old": torch.tensor([0.0]),
+                },
+                "initialization_source": {"kind": "stage1"},
+            }
+            full_path = root / "full.pt"
+            export_stage8_full_checkpoint(source, checkpoint, full_path)
+            full = load_torch_checkpoint(full_path, mmap=False)
+            self.assertEqual(full["checkpoint_type"], "stage8_multitask_model")
+            self.assertIn("peptide_encoder.weight", full["model"])
+            self.assertNotIn("binding_model.old", full["model"])
+            self.assertTrue(any(name.startswith("binding_model.peptide_adapter") for name in full["model"]))
+            self.assertEqual(full["initialization_source"]["kind"], "stage3")
+            exported_binding = extract_stage8_binding_state(full)
+            self.assertEqual(set(exported_binding), set(checkpoint["model"]))
+            for name, tensor in checkpoint["model"].items():
+                self.assertTrue(torch.equal(exported_binding[name], tensor))
+
+            # A copied last checkpoint must be self-contained even if companion
+            # best/prediction artifacts have disappeared.
+            trainer.best_path.unlink()
+            trainer.prediction_path.unlink()
+            resume_model = Stage8BindingModel(model_config)
+            resume_model.load_state_dict(source_binding_state)
+            resumed = Stage8Trainer(
+                resume_model, config, [batch], [batch],
+                condition=Stage8Condition.FULL, source=source,
+                data_audit={"dataset_fingerprint": "data-sha"},
+                run_timestamp="20260809_000000_000001",
+            )
+            resumed.fit(resume=trainer.last_path)
+            self.assertTrue(resumed.best_path.is_file())
+            self.assertTrue(resumed.prediction_path.is_file())
+            with self.assertRaisesRegex(ValueError, "requires.*last checkpoint"):
+                resumed.resume(resumed.best_path)
+
+            changed_config = deepcopy(config)
+            changed_config.stage8.hierarchy_lambda = 0.06
+            changed = Stage8Trainer(
+                Stage8BindingModel(model_config), changed_config, [batch], [batch],
+                condition=Stage8Condition.FULL, source=source,
+                data_audit={"dataset_fingerprint": "data-sha"},
+                run_timestamp="20260809_000000_000001",
+            )
+            with self.assertRaisesRegex(ValueError, "training contract mismatch"):
+                changed.resume(trainer.last_path)
+
+
+
+if __name__ == "__main__":
+    unittest.main()
