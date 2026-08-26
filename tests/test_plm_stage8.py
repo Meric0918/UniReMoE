@@ -36,10 +36,21 @@ from source.plm_unified.stage8_checkpoint import (
     Stage3Source, export_stage8_full_checkpoint, extract_stage8_binding_state,
     load_stage3_source, load_torch_checkpoint,
 )
-from source.plm_unified.stage8_evaluation import stage8_joint_score
+from source.plm_unified.stage8_evaluation import (
+    evaluate_online_stage8_model,
+    stage8_joint_score,
+)
 from source.plm_unified.stage8_loss import compute_stage8_loss
-from source.plm_unified.stage8_model import Stage8BindingModel
-from source.plm_unified.stage8_trainer import Stage8Trainer, build_stage8_optimizer
+from source.plm_unified.stage8_model import (
+    ProgressiveStage8FineTuningModel,
+    Stage8BindingModel,
+)
+from source.plm_unified.stage8_trainer import (
+    Stage8OnlineTrainer,
+    Stage8Trainer,
+    build_stage8_online_optimizer,
+    build_stage8_optimizer,
+)
 from source.plm_unified.cache import CacheLocator, EmbeddingCacheWriter
 
 
@@ -894,6 +905,194 @@ class Stage8ModelAndLossTests(unittest.TestCase):
             "violations": {"overall": 1.0},
         }
         self.assertAlmostEqual(stage8_joint_score(metrics), 0.62)
+
+
+class _OnlineStage8Batches:
+    """Small concrete iterable with DataLoader-like sample metadata."""
+
+    def __init__(self, batches: list[dict], samples: int, batch_size: int = 4):
+        self.batches = batches
+        self.dataset = list(range(samples))
+        self.batch_size = batch_size
+
+    def __iter__(self):
+        return iter(self.batches)
+
+    def __len__(self) -> int:
+        return len(self.batches)
+
+
+class Stage8OnlineTrainingTests(unittest.TestCase):
+    @staticmethod
+    def _model_config() -> ModelConfig:
+        return Stage8ModelAndLossTests._model_config()
+
+    @staticmethod
+    def _tiny_encoder(hidden_size: int, name: str):
+        return Stage8ModelAndLossTests._tiny_encoder(hidden_size, name)
+
+    def _model(self) -> ProgressiveStage8FineTuningModel:
+        return ProgressiveStage8FineTuningModel(
+            Stage8BindingModel(self._model_config()),
+            self._tiny_encoder(8, "peptide"),
+            self._tiny_encoder(8, "hla"),
+            self._tiny_encoder(6, "tcr"),
+            peptide_unfrozen_layers=2,
+            hla_unfrozen_layers=2,
+            tcr_unfrozen_layers=2,
+        )
+
+    def _config(self, root: Path) -> Stage8ExperimentConfig:
+        config = Stage8ExperimentConfig(
+            paths=Stage8Paths(root, root, root, root, root),
+            model=self._model_config(),
+        )
+        config.stage8.mixed_precision = "none"
+        return config
+
+    @staticmethod
+    def _joint_batch() -> dict:
+        return {
+            "peptide_sequences": ["PEP0", "PEP1", "PEP2", "PEP3"],
+            "hla_sequences": ["HLA0", "HLA1", "HLA2", "HLA3"],
+            "tcr_sequences": ["TCR0", "TCR1", "TCR2", "TCR3"],
+            "ph_labels": torch.tensor([1, 1, 0, 0]),
+            "pt_labels": torch.tensor([1, 0, 1, 0]),
+            "pht_labels": torch.tensor([1, 0, 0, 0]),
+            "label_types": ["111", "100", "010", "000"],
+            "source_rows": torch.tensor([0, 1, 2, 3]),
+        }
+
+    @staticmethod
+    def _replay_batch() -> dict:
+        return {
+            "peptide_sequences": ["PEP0", "PEP1", "PEP2", "PEP3"],
+            "receptor_sequences": ["REC0", "REC1", "REC2", "REC3"],
+            "labels": torch.tensor([1, 0, 1, 0]),
+        }
+
+    def test_stage8a_constraint_gate_ignores_full_condition(self) -> None:
+        logits = torch.tensor([[0.0, 3.0], [3.0, 0.0]], requires_grad=True)
+        labels = torch.tensor([1, 0])
+
+        loss = compute_stage8_loss(
+            logits, logits, logits, labels, labels, labels, ["111", "000"],
+            condition=Stage8Condition.FULL,
+            epoch=5,
+            phase="stage8a",
+        )
+
+        self.assertEqual(loss.hierarchy_lambda, 0.0)
+        self.assertEqual(loss.pt_implication_lambda, 0.0)
+        self.assertTrue(torch.equal(loss.total, loss.supervised))
+
+    def test_stage8b_round_index_ramps_constraints_through_round_five(self) -> None:
+        logits = torch.tensor([[0.0, 3.0], [3.0, 0.0]], requires_grad=True)
+        labels = torch.tensor([1, 0])
+        weights = []
+        for round_index in range(1, 7):
+            loss = compute_stage8_loss(
+                logits, logits, logits, labels, labels, labels, ["111", "000"],
+                condition=Stage8Condition.FULL,
+                epoch=0,
+                phase="stage8b",
+                round_index=round_index,
+            )
+            weights.append((loss.hierarchy_lambda, loss.pt_implication_lambda))
+
+        expected = [
+            (0.01, 0.006), (0.02, 0.012), (0.03, 0.018), (0.04, 0.024),
+            (0.05, 0.03), (0.05, 0.03),
+        ]
+        for actual, expected_weight in zip(weights, expected):
+            self.assertAlmostEqual(actual[0], expected_weight[0])
+            self.assertAlmostEqual(actual[1], expected_weight[1])
+
+    def test_online_optimizer_tracks_stage_trainability(self) -> None:
+        model = self._model()
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self._config(Path(temporary))
+            model.set_trainable_stage8("joint", "stage8a")
+            warmup = build_stage8_online_optimizer(model, config, "stage8a")
+            warmup_ids = {
+                id(parameter)
+                for group in warmup.param_groups
+                for parameter in group["params"]
+            }
+            self.assertEqual(
+                warmup_ids,
+                {
+                    id(parameter)
+                    for module in model.binding_model.new_triplet_modules().values()
+                    for parameter in module.parameters()
+                },
+            )
+
+            model.set_trainable_stage8("joint", "stage8b")
+            online = build_stage8_online_optimizer(model, config, "stage8b")
+            online_ids = {
+                id(parameter)
+                for group in online.param_groups
+                for parameter in group["params"]
+            }
+            top_ids = {
+                id(parameter)
+                for encoder in (model.peptide_encoder, model.hla_encoder, model.tcr_encoder)
+                for block in encoder.transformer_blocks()[-2:]
+                for parameter in block.parameters()
+            }
+            self.assertTrue(top_ids <= online_ids)
+            self.assertEqual(
+                online_ids,
+                {id(parameter) for parameter in model.parameters() if parameter.requires_grad},
+            )
+
+    def test_stage8b_runs_capped_ph_then_pt_then_joint_passes(self) -> None:
+        model = self._model()
+        joint = _OnlineStage8Batches([self._joint_batch()], samples=4)
+        replay = _OnlineStage8Batches([self._replay_batch()], samples=4)
+        with tempfile.TemporaryDirectory() as temporary:
+            trainer = Stage8OnlineTrainer(
+                model,
+                self._config(Path(temporary)),
+                {"phla": replay, "ptcr": replay, "joint": joint},
+                joint,
+                condition=Stage8Condition.FULL,
+            )
+            trainer.train_stage8a_epoch(1)
+            trainer.train_stage8a_epoch(2)
+            result = trainer.train_stage8b_round(1)
+
+        self.assertEqual(trainer.pass_history[-3:], [
+            ("stage8b", 1, "phla"),
+            ("stage8b", 1, "ptcr"),
+            ("stage8b", 1, "joint"),
+        ])
+        self.assertEqual(result["phla"]["samples"], 1)
+        self.assertEqual(result["ptcr"]["samples"], 1)
+        self.assertEqual(result["joint"]["samples"], 4)
+        self.assertAlmostEqual(result["joint"]["hierarchy_lambda"], 0.01)
+        self.assertAlmostEqual(result["joint"]["pt_implication_lambda"], 0.006)
+
+    def test_online_evaluator_uses_sequences_and_preserves_stage8_score(self) -> None:
+        model = self._model()
+        joint = _OnlineStage8Batches([self._joint_batch()], samples=4)
+        evaluation = evaluate_online_stage8_model(
+            model,
+            joint,
+            device=torch.device("cpu"),
+            mixed_precision="none",
+        )
+
+        self.assertEqual(evaluation.predictions["pht_labels"].tolist(), [1, 0, 0, 0])
+        self.assertEqual(set(evaluation.metrics), {
+            "phla", "ptcr", "pht", "pht_selected", "violations",
+            "constraint_components", "by_type",
+        })
+        self.assertAlmostEqual(
+            evaluation.joint_score,
+            stage8_joint_score(evaluation.metrics),
+        )
 
 
 class _FakeCache:
