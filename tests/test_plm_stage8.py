@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import importlib.util
+import subprocess
+import sys
 import tempfile
 import unittest
 from collections import Counter
@@ -31,7 +34,7 @@ from source.plm_unified.stage8_data import (
     audit_stage8_class_dirs,
     stage8_cache_hidden_dtype,
 )
-from source.plm_unified import stage8_data, stage8_model
+from source.plm_unified import stage8_checkpoint, stage8_data, stage8_model
 from source.plm_unified.stage8_checkpoint import (
     Stage3Source, export_stage8_full_checkpoint, extract_stage8_binding_state,
     load_stage3_source, load_torch_checkpoint,
@@ -1445,6 +1448,474 @@ class Stage8CacheAndCheckpointTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "training contract mismatch"):
                 changed.resume(trainer.last_path)
+
+
+class Stage8V2CheckpointTests(unittest.TestCase):
+    TIMESTAMP = "20260826_120000_000001"
+
+    @staticmethod
+    def _model() -> ProgressiveStage8FineTuningModel:
+        return ProgressiveStage8FineTuningModel(
+            Stage8BindingModel(Stage8ModelAndLossTests._model_config()),
+            Stage8ModelAndLossTests._tiny_encoder(8, "peptide"),
+            Stage8ModelAndLossTests._tiny_encoder(8, "hla"),
+            Stage8ModelAndLossTests._tiny_encoder(6, "tcr"),
+            peptide_unfrozen_layers=2,
+            hla_unfrozen_layers=2,
+            tcr_unfrozen_layers=2,
+        )
+
+    @staticmethod
+    def _config(root: Path) -> Stage8ExperimentConfig:
+        config = Stage8ExperimentConfig(
+            paths=Stage8Paths(
+                root, root, root / "cache", root / "models", root / "logs",
+                stage1_checkpoint=root / "stage1.pt",
+                stage1_sha256="a" * 64,
+            ),
+            model=Stage8ModelAndLossTests._model_config(),
+        )
+        config.stage8.mixed_precision = "none"
+        return config
+
+    @staticmethod
+    def _metrics(score: float = 0.75) -> dict:
+        return {
+            "validation_metrics": {"pht": {"auroc": score}},
+            "validation_joint_score": score,
+            "selected_pht_threshold": 0.5,
+        }
+
+    @staticmethod
+    def _source() -> dict:
+        return {
+            "kind": "stage1",
+            "path": "/tmp/stage1.pt",
+            "sha256": "a" * 64,
+            "source_fold": 1,
+            "source_seed": 42,
+        }
+
+    @staticmethod
+    def _trainer(
+        model: ProgressiveStage8FineTuningModel,
+        config: Stage8ExperimentConfig,
+        condition: Stage8Condition = Stage8Condition.FULL,
+    ) -> Stage8OnlineTrainer:
+        joint_batch = Stage8OnlineTrainingTests._joint_batch()
+        replay_batch = Stage8OnlineTrainingTests._replay_batch()
+        joint = _OnlineStage8Batches([joint_batch], samples=4)
+        replay = _OnlineStage8Batches([replay_batch], samples=4)
+        trainer = Stage8OnlineTrainer(
+            model,
+            config,
+            {"phla": replay, "ptcr": replay, "joint": joint},
+            joint,
+            condition=condition,
+        )
+        trainer.stage8a_epoch = config.stage8.stage8a_epochs
+        trainer.begin_stage8b()
+        trainer.stage8b_round = 3
+        trainer.global_step = 17
+        trainer.bad_rounds = 2
+        trainer.best_joint = 0.75
+        return trainer
+
+    def _write_run(self, root: Path):
+        save_warmup = getattr(
+            stage8_checkpoint, "save_stage8_warmup_checkpoint", None
+        )
+        save_best = getattr(
+            stage8_checkpoint, "save_stage8_best_checkpoint", None
+        )
+        save_last = getattr(
+            stage8_checkpoint, "save_stage8_last_checkpoint", None
+        )
+        self.assertIsNotNone(save_warmup)
+        self.assertIsNotNone(save_best)
+        self.assertIsNotNone(save_last)
+        if save_warmup is None or save_best is None or save_last is None:
+            raise AssertionError("Stage8 V2 checkpoint writers are unavailable")
+        config = self._config(root)
+        model = self._model()
+        warmup = save_warmup(
+            root / "warmup",
+            model=model,
+            config=config,
+            source_stage1=self._source(),
+            dataset_fingerprint="data-sha",
+            run_timestamp=self.TIMESTAMP,
+            metrics=self._metrics(0.70),
+        )
+        trainer = self._trainer(model, config)
+        run_dir = root / "full"
+        best = save_best(
+            run_dir,
+            trainer=trainer,
+            source_stage1=self._source(),
+            warmup_checkpoint=warmup,
+            dataset_fingerprint="data-sha",
+            run_timestamp=self.TIMESTAMP,
+            metrics=self._metrics(),
+        )
+        last = save_last(
+            run_dir,
+            trainer=trainer,
+            source_stage1=self._source(),
+            warmup_checkpoint=warmup,
+            dataset_fingerprint="data-sha",
+            run_timestamp=self.TIMESTAMP,
+            metrics=self._metrics(0.73),
+            best_checkpoint=best,
+        )
+        return config, model, trainer, warmup, best, last
+
+    def test_v2_round_trip_contains_full_online_model_and_role_specific_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, model, _, warmup_path, best_path, last_path = self._write_run(root)
+            warmup = load_torch_checkpoint(warmup_path, mmap=False)
+            best = load_torch_checkpoint(best_path, mmap=False)
+            last = load_torch_checkpoint(last_path, mmap=False)
+
+            self.assertEqual(
+                warmup_path.name,
+                f"stage8a_best_pht_{self.TIMESTAMP}.pt",
+            )
+            self.assertEqual(best_path.name, f"stage8_best_{self.TIMESTAMP}.pt")
+            self.assertEqual(last_path.name, f"stage8_last_{self.TIMESTAMP}.pt")
+            for checkpoint in (warmup, best, last):
+                self.assertEqual(checkpoint["format_version"], 2)
+                self.assertEqual(checkpoint["checkpoint_type"], "stage8_online_model")
+                self.assertEqual(checkpoint["source_stage1"]["sha256"], "a" * 64)
+                self.assertEqual(checkpoint["dataset_fingerprint"], "data-sha")
+                self.assertIn("training_contract", checkpoint)
+                self.assertIn("metrics", checkpoint)
+                for prefix in (
+                    "peptide_encoder.", "hla_encoder.", "tcr_encoder.",
+                    "binding_model.",
+                ):
+                    self.assertTrue(any(name.startswith(prefix) for name in checkpoint["model"]))
+            for checkpoint in (warmup, best):
+                self.assertNotIn("optimizer", checkpoint)
+                self.assertNotIn("scheduler", checkpoint)
+                self.assertNotIn("scaler", checkpoint)
+                self.assertNotIn("rng_state", checkpoint)
+            for key in ("optimizer", "scheduler", "scaler", "rng_state"):
+                self.assertIn(key, last)
+            self.assertNotIn("best_model", last)
+            self.assertEqual(best["condition"], "full")
+            self.assertEqual(
+                best["source_stage8a"]["sha256"],
+                hashlib.sha256(warmup_path.read_bytes()).hexdigest(),
+            )
+            self.assertEqual(
+                last["best_companion"]["sha256"],
+                hashlib.sha256(best_path.read_bytes()).hexdigest(),
+            )
+
+            restored = self._model()
+            restored.load_state_dict(best["model"], strict=True)
+            for name, value in model.state_dict().items():
+                torch.testing.assert_close(restored.state_dict()[name], value)
+            extracted = extract_stage8_binding_state(best)
+            self.assertEqual(
+                set(extracted), set(model.binding_model.state_dict())
+            )
+            for name, value in model.binding_model.state_dict().items():
+                torch.testing.assert_close(extracted[name], value)
+
+    def test_public_v2_loader_rejects_v1_stage8_checkpoints_clearly(self) -> None:
+        load_v2 = getattr(stage8_checkpoint, "load_stage8_v2_checkpoint", None)
+        self.assertIsNotNone(load_v2)
+        if load_v2 is None:
+            return
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "stage8_best_old.pt"
+            torch.save({
+                "format_version": 1,
+                "checkpoint_type": "stage8_binding_model",
+                "model": {"weight": torch.ones(1)},
+            }, path)
+            with self.assertRaisesRegex(ValueError, "V1.*not supported"):
+                load_v2(path)
+
+    def test_resume_restores_last_state_and_requires_exact_best_companion(self) -> None:
+        resume = getattr(stage8_checkpoint, "resume_stage8_last_checkpoint", None)
+        self.assertIsNotNone(resume)
+        if resume is None:
+            return
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, saved_model, saved_trainer, _, _, last = self._write_run(root)
+            restored_model = self._model()
+            restored_trainer = self._trainer(restored_model, config)
+            restored_trainer.stage8b_round = 0
+            restored_trainer.global_step = 0
+            restored_trainer.bad_rounds = 0
+            restored_trainer.best_joint = -float("inf")
+
+            checkpoint = resume(
+                last,
+                trainer=restored_trainer,
+                config=config,
+                source_stage1_sha256="a" * 64,
+                dataset_fingerprint="data-sha",
+                condition=Stage8Condition.FULL,
+            )
+
+            self.assertEqual(checkpoint["artifact_role"], "last")
+            self.assertEqual(restored_trainer.training_state(), saved_trainer.training_state())
+            for name, value in saved_model.state_dict().items():
+                torch.testing.assert_close(restored_model.state_dict()[name], value)
+
+    def test_new_stage8b_run_initialises_best_companion_at_round_zero(self) -> None:
+        initialise = getattr(
+            stage8_checkpoint, "initialise_stage8b_checkpoints", None
+        )
+        self.assertIsNotNone(initialise)
+        if initialise is None:
+            return
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = self._config(root)
+            model = self._model()
+            warmup_writer = stage8_checkpoint.save_stage8_warmup_checkpoint
+            warmup = warmup_writer(
+                root / "warmup",
+                model=model,
+                config=config,
+                source_stage1=self._source(),
+                dataset_fingerprint="data-sha",
+                run_timestamp=self.TIMESTAMP,
+                metrics=self._metrics(0.70),
+            )
+            trainer = self._trainer(model, config)
+            trainer.stage8b_round = 0
+            best, last = initialise(
+                root / "baseline",
+                trainer=trainer,
+                source_stage1=self._source(),
+                warmup_checkpoint=warmup,
+                dataset_fingerprint="data-sha",
+                run_timestamp=self.TIMESTAMP,
+                metrics=self._metrics(0.70),
+            )
+
+            best_value = load_torch_checkpoint(best, mmap=False)
+            last_value = load_torch_checkpoint(last, mmap=False)
+            self.assertEqual(best_value["training_state"]["stage8b_round"], 0)
+            self.assertEqual(last_value["training_state"]["stage8b_round"], 0)
+            self.assertEqual(
+                last_value["best_companion"]["sha256"],
+                hashlib.sha256(best.read_bytes()).hexdigest(),
+            )
+
+    def test_resume_rejects_source_warmup_condition_data_and_config_mismatch(self) -> None:
+        resume = getattr(stage8_checkpoint, "resume_stage8_last_checkpoint", None)
+        self.assertIsNotNone(resume)
+        if resume is None:
+            return
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, _, _, warmup, _, last = self._write_run(root)
+            cases = (
+                ("source", {"source_stage1_sha256": "b" * 64}, config, "Stage-1 source"),
+                ("condition", {"condition": Stage8Condition.BASELINE}, config, "condition"),
+                ("data", {"dataset_fingerprint": "other-data"}, config, "data fingerprint"),
+            )
+            for name, overrides, current_config, message in cases:
+                with self.subTest(name=name):
+                    kwargs = {
+                        "trainer": self._trainer(self._model(), current_config),
+                        "config": current_config,
+                        "source_stage1_sha256": "a" * 64,
+                        "dataset_fingerprint": "data-sha",
+                        "condition": Stage8Condition.FULL,
+                    }
+                    kwargs.update(overrides)
+                    with self.assertRaisesRegex(ValueError, message):
+                        resume(last, **kwargs)
+
+            changed_config = deepcopy(config)
+            changed_config.stage8.hierarchy_lambda = 0.06
+            with self.assertRaisesRegex(ValueError, "configuration"):
+                resume(
+                    last,
+                    trainer=self._trainer(self._model(), config),
+                    config=changed_config,
+                    source_stage1_sha256="a" * 64,
+                    dataset_fingerprint="data-sha",
+                    condition=Stage8Condition.FULL,
+                )
+
+            original_warmup = warmup.read_bytes()
+            torch.save({"format_version": 2, "changed": True}, warmup)
+            with self.assertRaisesRegex(ValueError, "warmup.*SHA256"):
+                resume(
+                    last,
+                    trainer=self._trainer(self._model(), config),
+                    config=config,
+                    source_stage1_sha256="a" * 64,
+                    dataset_fingerprint="data-sha",
+                    condition=Stage8Condition.FULL,
+                )
+            warmup.write_bytes(original_warmup)
+
+    def test_resume_rejects_missing_wrong_sha_or_v1_best_companion(self) -> None:
+        resume = getattr(stage8_checkpoint, "resume_stage8_last_checkpoint", None)
+        self.assertIsNotNone(resume)
+        if resume is None:
+            return
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, _, _, _, best, last = self._write_run(root)
+            kwargs = {
+                "trainer": self._trainer(self._model(), config),
+                "config": config,
+                "source_stage1_sha256": "a" * 64,
+                "dataset_fingerprint": "data-sha",
+                "condition": Stage8Condition.FULL,
+            }
+            best_bytes = best.read_bytes()
+            best.unlink()
+            with self.assertRaisesRegex(FileNotFoundError, "best companion"):
+                resume(last, **kwargs)
+            best.write_bytes(best_bytes)
+
+            last_value = load_torch_checkpoint(last, mmap=False)
+            last_value["best_companion"]["sha256"] = "0" * 64
+            torch.save(last_value, last)
+            with self.assertRaisesRegex(ValueError, "best companion SHA256"):
+                resume(last, **kwargs)
+
+            torch.save({
+                "format_version": 1,
+                "checkpoint_type": "stage8_binding_model",
+                "artifact_role": "last",
+            }, last)
+            with self.assertRaisesRegex(ValueError, "V1.*not supported"):
+                resume(last, **kwargs)
+
+
+class Stage8V2CliTests(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parents[1]
+    PYTHON = Path(sys.executable)
+
+    def _run_help(self, script: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(self.PYTHON), str(self.ROOT / "source" / script), "--help"],
+            cwd=self.ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def _run_train(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                str(self.PYTHON),
+                str(self.ROOT / "source" / "train_plm_stage8.py"),
+                *arguments,
+            ],
+            cwd=self.ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_train_cli_exposes_only_stage1_warmup_and_v2_modes(self) -> None:
+        result = self._run_help("train_plm_stage8.py")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--warmup-only", result.stdout)
+        self.assertIn("--stage1-checkpoint", result.stdout)
+        self.assertIn("--warmup-checkpoint", result.stdout)
+        self.assertIn("--all-ablations", result.stdout)
+        self.assertNotIn("--stage3-checkpoint", result.stdout)
+
+    def test_train_cli_modes_and_required_sources_are_enforced_by_parser(self) -> None:
+        missing_stage1 = self._run_train("--warmup-only")
+        self.assertEqual(missing_stage1.returncode, 2)
+        self.assertIn("--warmup-only requires --stage1-checkpoint", missing_stage1.stderr)
+
+        missing_warmup = self._run_train("--condition", "baseline")
+        self.assertEqual(missing_warmup.returncode, 2)
+        self.assertIn("--condition requires --warmup-checkpoint", missing_warmup.stderr)
+
+        conflicting = self._run_train(
+            "--condition", "baseline",
+            "--resume", "stage8_last_20260826_120000_000001.pt",
+        )
+        self.assertEqual(conflicting.returncode, 2)
+        self.assertIn("not allowed with argument", conflicting.stderr)
+
+    def test_ablation_commands_share_one_warmup_timestamp_and_config(self) -> None:
+        source_root = self.ROOT / "source"
+        sys.path.insert(0, str(source_root))
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "stage8_ablation_cli_for_test",
+                source_root / "run_plm_stage8_ablations.py",
+            )
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader if spec else None)
+            if spec is None or spec.loader is None:
+                return
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        finally:
+            sys.path.remove(str(source_root))
+        build_commands = getattr(module, "build_ablation_commands", None)
+        self.assertIsNotNone(build_commands)
+        if build_commands is None:
+            return
+        config = Path("/tmp/stage8.yaml")
+        stage1 = Path("/tmp/stage1.pt")
+        warmup = Path("/tmp/stage8a_best_pht_20260826_120000_000001.pt")
+        commands = build_commands(
+            config_path=config,
+            stage1_checkpoint=stage1,
+            warmup_checkpoint=warmup,
+            run_timestamp="20260826_120000_000001",
+            python_executable=Path("/tmp/python"),
+            source_dir=Path("/tmp/source"),
+            device="cpu",
+            num_workers=0,
+            swanlab_mode="disabled",
+            limit_per_type=1,
+        )
+
+        self.assertEqual(len(commands), 5)
+        self.assertEqual(commands[0].count("--warmup-only"), 1)
+        self.assertEqual(commands[0].count("--stage1-checkpoint"), 1)
+        for command, condition in zip(commands[1:], Stage8Condition):
+            self.assertIn("--condition", command)
+            self.assertIn(condition.value, command)
+            warmup_index = command.index("--warmup-checkpoint") + 1
+            timestamp_index = command.index("--run-timestamp") + 1
+            self.assertEqual(command[warmup_index], str(warmup))
+            self.assertEqual(command[timestamp_index], "20260826_120000_000001")
+            self.assertEqual(command[command.index("--config") + 1], str(config))
+
+    def test_evaluation_clis_do_not_accept_stage3_sources(self) -> None:
+        for script in ("evaluate_plm_stage8.py", "evaluate_plm_stage8_tcr_sets.py"):
+            with self.subTest(script=script):
+                result = self._run_help(script)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("--stage3-checkpoint", result.stdout)
+                self.assertNotIn("--stage3-config", result.stdout)
+
+    def test_run_stage8_exposes_audit_warmup_train_and_ablations_only(self) -> None:
+        result = subprocess.run(
+            ["bash", str(self.ROOT / "run_stage8.sh"), "unknown"],
+            cwd=self.ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("{audit|warmup|train|ablations}", result.stderr)
+        self.assertNotIn("cache", result.stderr)
 
 
 
