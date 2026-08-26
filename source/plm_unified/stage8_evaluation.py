@@ -4,14 +4,75 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
+import math
 from typing import Mapping
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .metrics import compute_binary_metrics
-from .triplet_evaluation import select_mcc_threshold
+from .metrics import BinaryMetrics, compute_binary_metrics
+
+
+def select_mcc_threshold(labels, probabilities) -> tuple[float, BinaryMetrics]:
+    """Choose a validation threshold without importing an optional Stage3 CLI."""
+
+    y_true = np.asarray(labels, dtype=np.int64)
+    y_score = np.asarray(probabilities, dtype=np.float64)
+    if y_true.ndim != 1 or y_score.ndim != 1 or len(y_true) != len(y_score):
+        raise ValueError("labels and probabilities must be aligned 1-D arrays")
+    if len(y_true) == 0 or len(np.unique(y_true)) < 2:
+        raise ValueError("Threshold selection requires both classes")
+
+    order = np.argsort(-y_score, kind="mergesort")
+    sorted_score = y_score[order]
+    sorted_label = y_true[order]
+    positives = int(sorted_label.sum())
+    negatives = len(sorted_label) - positives
+    cumulative_tp = np.cumsum(sorted_label)
+    cumulative_fp = np.cumsum(1 - sorted_label)
+    candidate_indices = np.flatnonzero(np.r_[
+        sorted_score[:-1] != sorted_score[1:], True,
+    ])
+
+    best_key: tuple[float, float, float, float] | None = None
+    best_threshold = 0.5
+    for index in candidate_indices:
+        tp = int(cumulative_tp[index])
+        fp = int(cumulative_fp[index])
+        fn = positives - tp
+        tn = negatives - fp
+        denominator = (tp + fp) * (tp + fn) * (tn + fp) * (tn + fn)
+        mcc = (
+            (tp * tn - fp * fn) / math.sqrt(denominator)
+            if denominator else 0.0
+        )
+        f1_denominator = 2 * tp + fp + fn
+        f1 = 2 * tp / f1_denominator if f1_denominator else 0.0
+        threshold = float(sorted_score[index])
+        key = (mcc, f1, -abs(threshold - 0.5), -threshold)
+        if best_key is None or key > best_key:
+            best_key = key
+            best_threshold = threshold
+
+    predictions = y_score >= 0.5
+    tp = int(np.sum(predictions & (y_true == 1)))
+    fp = int(np.sum(predictions & (y_true == 0)))
+    fn = int(np.sum(~predictions & (y_true == 1)))
+    tn = int(np.sum(~predictions & (y_true == 0)))
+    denominator = (tp + fp) * (tp + fn) * (tn + fp) * (tn + fn)
+    mcc = (
+        (tp * tn - fp * fn) / math.sqrt(denominator)
+        if denominator else 0.0
+    )
+    f1_denominator = 2 * tp + fp + fn
+    f1 = 2 * tp / f1_denominator if f1_denominator else 0.0
+    if best_key is None or (mcc, f1, 0.0, -0.5) > best_key:
+        best_threshold = 0.5
+
+    return best_threshold, compute_binary_metrics(
+        y_true, y_score, loss=0.0, threshold=best_threshold
+    )
 
 
 def stage8_task_score(metrics: Mapping[str, float]) -> float:

@@ -1,0 +1,88 @@
+paths:
+  project_root: ..
+  data_root: ../dataset
+  cache_root: ../embedding_cache
+  output_root: ../trained_model/PLM_Stage8
+  swanlog_root: ../swanlog/PLM_Stage8
+  esmc_model: /home/mjp/model/ESMC-300M
+  tcr_bert_model: /home/mjp/model/TCR-Bert
+  stage1_checkpoint: ../trained_model/PLM_Unified_PH_PT/fold_1/seed_42/best_round/best_joint_20260824_174202_510837.pt
+  stage1_sha256: 5cef56d3f5e392828d23659a53df20f7c8ec0f4678e5d639ec1b798ed02a5f96
+
+model:
+  peptide_input_dim: 960
+  hla_input_dim: 960
+  tcr_input_dim: 768
+  adapter_hidden_dim: 256
+  model_dim: 128
+  num_attention_heads: 4
+  feedforward_dim: 512
+  adapter_dropout: 0.1
+  attention_dropout: 0.1
+  classifier_dropout: 0.2
+  peptide_min_length: 8
+  peptide_max_length: 15
+  hla_max_length: 34
+  tcr_max_length: 34
+
+cache:
+  dtype: float16
+  shard_size: 16384
+  precompute_batch_size: 32
+  compression: null
+
+runtime:
+  fold: 1
+  seed: 42
+  device: auto
+  num_workers: 2
+
+stage8:
+  data_mode: pht_class_dirs
+  data_subdir: PHT/classes
+  class_dirs: [PHT_000, PHT_010, PHT_100, PHT_111]
+  train_filename: train.csv
+  val_filename: val.csv
+  reject_noncanonical_sequences: true
+  stage8a_epochs: 2
+  micro_batch_size: 4
+  batch_size: 256
+  eval_batch_size: 32
+  gradient_accumulation_steps: 16
+  binary_replay_ratio: 0.25
+  peptide_unfrozen_layers: 2
+  hla_unfrozen_layers: 2
+  tcr_unfrozen_layers: 2
+  min_rounds: 5
+  max_rounds: 15
+  max_epochs: 15
+  min_epochs: 5
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.0001
+  pht_loss_weight: 1.0
+  phla_loss_weight: 0.3
+  ptcr_loss_weight: 0.2
+  pht_score_weight: 0.4
+  phla_score_weight: 0.2
+  ptcr_score_weight: 0.4
+  constraint_margin: 0.05
+  hierarchy_lambda: 0.05
+  pt_implication_lambda: 0.03
+  constraint_ramp_epochs: 5
+  joint_degradation_tolerance: 0.002
+  adapter_lr: 0.000025
+  pretrained_attention_lr: 0.00005
+  triplet_module_lr: 0.0001
+  weight_decay: 0.01
+  scheduler_warmup_ratio: 0.05
+  gradient_clip_norm: 1.0
+  mixed_precision: bf16
+  log_every_steps: 50
+
+swanlab:
+  project: unifyimmun
+  workspace: null
+  mode: online
+  group: plm-stage8-fold{fold}
+  experiment_prefix: PLM-Stage8
+  tags: [ESMC-300M, TCR-BERT, stage8, four-type, constraints]

@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT=/home/mjp/Project/PLM/UnifyImmun
-PYTHON_BIN=/home/mjp/miniconda3/envs/unifyimmun/bin/python
-CONFIG="$PROJECT_ROOT/configs/plm_stage8.yaml"
+PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+if [[ -z ${PYTHON_BIN:-} ]]; then
+  if [[ -x /home/mjp/miniconda3/envs/unifyimmun/bin/python ]]; then
+    PYTHON_BIN=/home/mjp/miniconda3/envs/unifyimmun/bin/python
+  else
+    PYTHON_BIN=$(command -v python3)
+  fi
+fi
+CONFIG=${STAGE8_CONFIG:-"$PROJECT_ROOT/configs/plm_stage8.yaml"}
 
 ACTION=${1:-audit}
 if [[ $# -gt 0 ]]; then

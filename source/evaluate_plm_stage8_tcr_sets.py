@@ -23,7 +23,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from evaluate_plm_triplet_tcr_sets import _encode_unique
 from plm_unified.data import OnlinePairDataset
 from plm_unified.metrics import compute_binary_metrics
 from plm_unified.stage8_checkpoint import (
@@ -78,6 +77,57 @@ def resolve_files(data_dir: Path, value: str | None) -> list[Path]:
     if missing:
         raise FileNotFoundError(f"Dataset file not found: {missing[0]}")
     return paths
+
+
+def _encode_unique(
+    label: str,
+    encoder,
+    sequences: list[str],
+    max_length: int,
+    batch_size: int,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Encode each unique sequence once without depending on another CLI."""
+
+    hidden = np.empty(
+        (len(sequences), max_length, encoder.hidden_size), dtype=np.float16
+    )
+    mask = np.empty((len(sequences), max_length), dtype=np.uint8)
+    total_batches = (len(sequences) + batch_size - 1) // batch_size
+    started = time.time()
+    with torch.inference_mode():
+        for batch_id, start in enumerate(
+            range(0, len(sequences), batch_size), start=1
+        ):
+            end = min(start + batch_size, len(sequences))
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.bfloat16,
+                enabled=device.type == "cuda",
+            ):
+                encoded = encoder(sequences[start:end])
+            hidden[start:end] = (
+                encoded.hidden.detach()
+                .to(device="cpu", dtype=torch.float16)
+                .numpy()
+            )
+            mask[start:end] = (
+                encoded.mask.detach()
+                .to(device="cpu", dtype=torch.uint8)
+                .numpy()
+            )
+            if batch_id == 1 or batch_id % 50 == 0 or batch_id == total_batches:
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                elapsed = time.time() - started
+                print(
+                    f"[ENCODE {label}] {batch_id:,}/{total_batches:,} "
+                    f"sequences={end:,}/{len(sequences):,} "
+                    f"rate={end / max(elapsed, 1e-9):.1f}/s "
+                    f"elapsed={elapsed / 60:.1f} min",
+                    flush=True,
+                )
+    return hidden, mask
 
 
 def _fmt(value: float, digits: int = 6) -> str:

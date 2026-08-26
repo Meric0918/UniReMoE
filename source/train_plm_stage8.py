@@ -148,9 +148,17 @@ def _warmup_dir(config) -> Path:
     )
 
 
+def _effective_data(train_loaders, val_loader, limit_per_type: int | None) -> dict:
+    return {
+        "limit_per_type": limit_per_type,
+        "train_samples": len(train_loaders["joint"].dataset),
+        "validation_samples": len(val_loader.dataset),
+    }
+
+
 def _train_warmup(
     *, config, model, train_loaders, val_loader, source_stage1,
-    dataset_fingerprint: str, run_timestamp: str, tracker,
+    dataset_fingerprint: str, effective_data, run_timestamp: str, tracker,
 ) -> Path:
     trainer = Stage8OnlineTrainer(
         model, config, train_loaders, val_loader,
@@ -175,6 +183,7 @@ def _train_warmup(
                 _warmup_dir(config), model=model, config=config,
                 source_stage1=source_stage1,
                 dataset_fingerprint=dataset_fingerprint,
+                effective_data=effective_data,
                 run_timestamp=run_timestamp, metrics=_metrics(evaluation),
                 training_state=trainer.training_state(),
             )
@@ -185,7 +194,7 @@ def _train_warmup(
 
 def _train_stage8b_rounds(
     *, trainer, output_dir: Path, source_stage1, warmup_checkpoint: Path,
-    dataset_fingerprint: str, run_timestamp: str, best_path: Path,
+    dataset_fingerprint: str, effective_data, run_timestamp: str, best_path: Path,
     start_round: int, tracker,
 ) -> tuple[Path, Path]:
     last_path = output_dir / f"stage8_last_{run_timestamp}.pt"
@@ -209,6 +218,7 @@ def _train_stage8b_rounds(
                 output_dir, trainer=trainer, source_stage1=source_stage1,
                 warmup_checkpoint=warmup_checkpoint,
                 dataset_fingerprint=dataset_fingerprint,
+                effective_data=effective_data,
                 run_timestamp=run_timestamp, metrics=_metrics(evaluation),
             )
         else:
@@ -217,6 +227,7 @@ def _train_stage8b_rounds(
             output_dir, trainer=trainer, source_stage1=source_stage1,
             warmup_checkpoint=warmup_checkpoint,
             dataset_fingerprint=dataset_fingerprint,
+            effective_data=effective_data,
             run_timestamp=run_timestamp, metrics=_metrics(evaluation),
             best_checkpoint=best_path,
         )
@@ -264,6 +275,9 @@ def main() -> None:
     audit, train_loaders, val_loader = _audit_and_loaders(
         config, run_timestamp=run_timestamp, limit_per_type=args.limit_per_type,
     )
+    effective_data = _effective_data(
+        train_loaders, val_loader, args.limit_per_type
+    )
     device = resolve_device(config.runtime.device)
     model = build_progressive_stage8_model(config, device)
 
@@ -278,6 +292,7 @@ def main() -> None:
                 config=config, model=model, train_loaders=train_loaders,
                 val_loader=val_loader, source_stage1=source_stage1,
                 dataset_fingerprint=audit.dataset_fingerprint,
+                effective_data=effective_data,
                 run_timestamp=run_timestamp, tracker=tracker,
             )
         print(f"Stage8A warmup complete: {warmup_path}")
@@ -298,6 +313,7 @@ def main() -> None:
             warmup, config=config,
             source_stage1_sha256=config.paths.stage1_sha256,
             dataset_fingerprint=audit.dataset_fingerprint,
+            effective_data=effective_data,
         )
         model.load_state_dict(warmup["model"], strict=True)
         source_stage1 = dict(warmup["source_stage1"])
@@ -311,9 +327,11 @@ def main() -> None:
         )
         if resume_value is not None:
             resume_stage8_last_checkpoint(
-                args.resume, trainer=trainer, config=config,
+                args.resume, checkpoint=resume_value,
+                trainer=trainer, config=config,
                 source_stage1_sha256=config.paths.stage1_sha256,
                 dataset_fingerprint=audit.dataset_fingerprint,
+                effective_data=effective_data,
                 condition=condition,
             )
             start_round = trainer.stage8b_round + 1
@@ -328,6 +346,7 @@ def main() -> None:
                 output_dir, trainer=trainer, source_stage1=source_stage1,
                 warmup_checkpoint=warmup_checkpoint,
                 dataset_fingerprint=audit.dataset_fingerprint,
+                effective_data=effective_data,
                 run_timestamp=run_timestamp, metrics=_metrics(baseline),
             )
             start_round = 1
@@ -335,6 +354,7 @@ def main() -> None:
             trainer=trainer, output_dir=output_dir,
             source_stage1=source_stage1, warmup_checkpoint=warmup_checkpoint,
             dataset_fingerprint=audit.dataset_fingerprint,
+            effective_data=effective_data,
             run_timestamp=run_timestamp, best_path=best_path,
             start_round=start_round, tracker=tracker,
         )

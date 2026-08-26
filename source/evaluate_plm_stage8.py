@@ -47,10 +47,7 @@ def main() -> None:
     )
     audit.require_clean()
     checkpoint = load_stage8_v2_checkpoint(args.checkpoint)
-    validate_stage8_v2_for_evaluation(
-        checkpoint, config=config, dataset_fingerprint=audit.dataset_fingerprint
-    )
-    _, val_loader = make_stage8_online_loaders(
+    train_loaders, val_loader = make_stage8_online_loaders(
         audit,
         phla_path=split_path(config.paths.data_root, "phla", "train", config.runtime.fold),
         ptcr_path=split_path(config.paths.data_root, "ptcr", "train", config.runtime.fold),
@@ -59,6 +56,16 @@ def main() -> None:
         eval_batch_size=config.stage8.eval_batch_size,
         seed=config.runtime.seed,
         num_workers=config.runtime.num_workers,
+    )
+    validate_stage8_v2_for_evaluation(
+        checkpoint,
+        config=config,
+        dataset_fingerprint=audit.dataset_fingerprint,
+        effective_data={
+            "limit_per_type": None,
+            "train_samples": len(train_loaders["joint"].dataset),
+            "validation_samples": len(val_loader.dataset),
+        },
     )
     device = resolve_device(config.runtime.device)
     model = build_progressive_stage8_model(config, device)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,7 @@ from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import numpy as np
@@ -221,8 +223,12 @@ class Stage8ConfigTests(unittest.TestCase):
             ("PHT_000", "PHT_010", "PHT_100", "PHT_111"),
         )
         self.assertEqual(
-            config.paths.stage3_checkpoint.name,
-            "stage3_best_joint_20260825_161220_330205.pt",
+            config.paths.stage1_checkpoint.name,
+            "best_joint_20260824_174202_510837.pt",
+        )
+        self.assertEqual(
+            config.paths.stage1_sha256,
+            "5cef56d3f5e392828d23659a53df20f7c8ec0f4678e5d639ec1b798ed02a5f96",
         )
         self.assertEqual(config.stage8.early_stopping_patience, 5)
         self.assertEqual(config.stage8.selection_weights, (0.4, 0.2, 0.4))
@@ -774,6 +780,34 @@ class Stage8ModelAndLossTests(unittest.TestCase):
                     seed=42,
                     expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                 )
+
+    def test_stage8_initialisation_errors_use_stage8_terminology(self) -> None:
+        model_config = self._model_config()
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "task.pt"
+            torch.save({
+                "format_version": 3,
+                "checkpoint_type": "task_model",
+            }, path)
+            target = SimpleNamespace(
+                binding_model=Stage8BindingModel(model_config),
+                encoder_metadata=lambda: {},
+            )
+
+            with self.assertRaises(ValueError) as raised:
+                stage8_model.initialise_stage8_from_stage1(
+                    target,
+                    path,
+                    model_config=model_config,
+                    fold=1,
+                    seed=42,
+                    expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                )
+
+            message = str(raised.exception)
+            self.assertIn("Stage-8", message)
+            self.assertNotIn("Stage 3", message)
+            self.assertNotIn("Stage-3", message)
 
     def test_condition_switches_and_linear_ramp(self) -> None:
         logits = torch.tensor([[0.0, 2.0], [2.0, 0.0]] * 2, requires_grad=True)
@@ -1497,6 +1531,14 @@ class Stage8V2CheckpointTests(unittest.TestCase):
         }
 
     @staticmethod
+    def _effective_data(limit_per_type=None) -> dict:
+        return {
+            "limit_per_type": limit_per_type,
+            "train_samples": 4,
+            "validation_samples": 4,
+        }
+
+    @staticmethod
     def _trainer(
         model: ProgressiveStage8FineTuningModel,
         config: Stage8ExperimentConfig,
@@ -1544,6 +1586,7 @@ class Stage8V2CheckpointTests(unittest.TestCase):
             config=config,
             source_stage1=self._source(),
             dataset_fingerprint="data-sha",
+            effective_data=self._effective_data(),
             run_timestamp=self.TIMESTAMP,
             metrics=self._metrics(0.70),
         )
@@ -1555,6 +1598,7 @@ class Stage8V2CheckpointTests(unittest.TestCase):
             source_stage1=self._source(),
             warmup_checkpoint=warmup,
             dataset_fingerprint="data-sha",
+            effective_data=self._effective_data(),
             run_timestamp=self.TIMESTAMP,
             metrics=self._metrics(),
         )
@@ -1564,6 +1608,7 @@ class Stage8V2CheckpointTests(unittest.TestCase):
             source_stage1=self._source(),
             warmup_checkpoint=warmup,
             dataset_fingerprint="data-sha",
+            effective_data=self._effective_data(),
             run_timestamp=self.TIMESTAMP,
             metrics=self._metrics(0.73),
             best_checkpoint=best,
@@ -1640,6 +1685,82 @@ class Stage8V2CheckpointTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "V1.*not supported"):
                 load_v2(path)
 
+    def test_v2_contract_records_effective_training_data_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, _, _, _, last_path = self._write_run(Path(temporary))
+            last = load_torch_checkpoint(last_path, mmap=False)
+
+            self.assertEqual(last.get("effective_data"), {
+                "limit_per_type": None,
+                "train_samples": 4,
+                "validation_samples": 4,
+            })
+            self.assertEqual(
+                last["training_contract"]["descriptor"].get("effective_data"),
+                {
+                    "limit_per_type": None,
+                    "train_samples": 4,
+                    "validation_samples": 4,
+                },
+            )
+
+    def test_v2_validator_enforces_role_specific_metadata(self) -> None:
+        validate = stage8_checkpoint.validate_stage8_v2_checkpoint
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, _, warmup_path, best_path, last_path = self._write_run(
+                Path(temporary)
+            )
+            warmup = load_torch_checkpoint(warmup_path, mmap=False)
+            best = load_torch_checkpoint(best_path, mmap=False)
+            last = load_torch_checkpoint(last_path, mmap=False)
+            cases = (
+                ("warmup-phase", warmup, "phase", "stage8b", "stage8a"),
+                ("warmup-condition", warmup, "condition", "baseline", "condition"),
+                (
+                    "warmup-source",
+                    warmup,
+                    "source_stage8a",
+                    dict(best["source_stage8a"]),
+                    "warmup source",
+                ),
+                ("warmup-optimizer", warmup, "optimizer", {}, "optimizer"),
+                ("best-phase", best, "phase", "stage8a", "stage8b"),
+                ("best-condition", best, "condition", "unknown", "condition"),
+                ("best-source", best, "source_stage8a", None, "warmup source"),
+                ("best-metrics", best, "metrics", {}, "metrics"),
+                ("last-optimizer", last, "optimizer", None, "optimizer"),
+                ("last-scheduler", last, "scheduler", None, "scheduler"),
+                ("last-scaler", last, "scaler", None, "scaler"),
+                ("last-rng", last, "rng_state", None, "rng_state"),
+                ("last-best-model", last, "best_model", {}, "best_model"),
+            )
+            for name, original, key, value, message in cases:
+                with self.subTest(name=name):
+                    malformed = deepcopy(original)
+                    if value is None:
+                        malformed.pop(key, None)
+                    else:
+                        malformed[key] = value
+                    with self.assertRaisesRegex(ValueError, message):
+                        validate(malformed)
+
+    def test_public_evaluation_validation_rejects_malformed_best(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config, _, _, _, best_path, _ = self._write_run(Path(temporary))
+            best = load_torch_checkpoint(best_path, mmap=False)
+            malformed_sources = (
+                {**best["source_stage8a"], "sha256": "not-a-sha"},
+                {**best["source_stage8a"], "path": None},
+            )
+            for source in malformed_sources:
+                with self.subTest(source=source):
+                    malformed = deepcopy(best)
+                    malformed["source_stage8a"] = source
+                    with self.assertRaisesRegex(ValueError, "warmup source"):
+                        stage8_checkpoint.validate_stage8_v2_for_evaluation(
+                            malformed, config=config
+                        )
+
     def test_resume_restores_last_state_and_requires_exact_best_companion(self) -> None:
         resume = getattr(stage8_checkpoint, "resume_stage8_last_checkpoint", None)
         self.assertIsNotNone(resume)
@@ -1661,6 +1782,7 @@ class Stage8V2CheckpointTests(unittest.TestCase):
                 config=config,
                 source_stage1_sha256="a" * 64,
                 dataset_fingerprint="data-sha",
+                effective_data=self._effective_data(),
                 condition=Stage8Condition.FULL,
             )
 
@@ -1668,6 +1790,36 @@ class Stage8V2CheckpointTests(unittest.TestCase):
             self.assertEqual(restored_trainer.training_state(), saved_trainer.training_state())
             for name, value in saved_model.state_dict().items():
                 torch.testing.assert_close(restored_model.state_dict()[name], value)
+
+    def test_resume_reuses_preloaded_last_checkpoint_without_loading_it_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, _, _, _, _, last_path = self._write_run(root)
+            preloaded = load_torch_checkpoint(last_path, mmap=False)
+            original_loader = stage8_checkpoint.load_stage8_v2_checkpoint
+
+            def track_load(path, *, artifact_role=None):
+                if Path(path).resolve() == last_path.resolve():
+                    raise AssertionError("last checkpoint was loaded twice")
+                return original_loader(path, artifact_role=artifact_role)
+
+            with patch.object(
+                stage8_checkpoint,
+                "load_stage8_v2_checkpoint",
+                side_effect=track_load,
+            ):
+                restored = stage8_checkpoint.resume_stage8_last_checkpoint(
+                    last_path,
+                    checkpoint=preloaded,
+                    trainer=self._trainer(self._model(), config),
+                    config=config,
+                    source_stage1_sha256="a" * 64,
+                    dataset_fingerprint="data-sha",
+                    effective_data=self._effective_data(),
+                    condition=Stage8Condition.FULL,
+                )
+
+            self.assertIs(restored, preloaded)
 
     def test_new_stage8b_run_initialises_best_companion_at_round_zero(self) -> None:
         initialise = getattr(
@@ -1687,6 +1839,7 @@ class Stage8V2CheckpointTests(unittest.TestCase):
                 config=config,
                 source_stage1=self._source(),
                 dataset_fingerprint="data-sha",
+                effective_data=self._effective_data(),
                 run_timestamp=self.TIMESTAMP,
                 metrics=self._metrics(0.70),
             )
@@ -1698,6 +1851,7 @@ class Stage8V2CheckpointTests(unittest.TestCase):
                 source_stage1=self._source(),
                 warmup_checkpoint=warmup,
                 dataset_fingerprint="data-sha",
+                effective_data=self._effective_data(),
                 run_timestamp=self.TIMESTAMP,
                 metrics=self._metrics(0.70),
             )
@@ -1723,6 +1877,20 @@ class Stage8V2CheckpointTests(unittest.TestCase):
                 ("source", {"source_stage1_sha256": "b" * 64}, config, "Stage-1 source"),
                 ("condition", {"condition": Stage8Condition.BASELINE}, config, "condition"),
                 ("data", {"dataset_fingerprint": "other-data"}, config, "data fingerprint"),
+                (
+                    "effective-limit",
+                    {"effective_data": self._effective_data(limit_per_type=1)},
+                    config,
+                    "effective data",
+                ),
+                (
+                    "effective-count",
+                    {"effective_data": {
+                        **self._effective_data(), "train_samples": 3,
+                    }},
+                    config,
+                    "effective data",
+                ),
             )
             for name, overrides, current_config, message in cases:
                 with self.subTest(name=name):
@@ -1731,6 +1899,7 @@ class Stage8V2CheckpointTests(unittest.TestCase):
                         "config": current_config,
                         "source_stage1_sha256": "a" * 64,
                         "dataset_fingerprint": "data-sha",
+                        "effective_data": self._effective_data(),
                         "condition": Stage8Condition.FULL,
                     }
                     kwargs.update(overrides)
@@ -1746,6 +1915,7 @@ class Stage8V2CheckpointTests(unittest.TestCase):
                     config=changed_config,
                     source_stage1_sha256="a" * 64,
                     dataset_fingerprint="data-sha",
+                    effective_data=self._effective_data(),
                     condition=Stage8Condition.FULL,
                 )
 
@@ -1758,6 +1928,7 @@ class Stage8V2CheckpointTests(unittest.TestCase):
                     config=config,
                     source_stage1_sha256="a" * 64,
                     dataset_fingerprint="data-sha",
+                    effective_data=self._effective_data(),
                     condition=Stage8Condition.FULL,
                 )
             warmup.write_bytes(original_warmup)
@@ -1775,6 +1946,7 @@ class Stage8V2CheckpointTests(unittest.TestCase):
                 "config": config,
                 "source_stage1_sha256": "a" * 64,
                 "dataset_fingerprint": "data-sha",
+                "effective_data": self._effective_data(),
                 "condition": Stage8Condition.FULL,
             }
             best_bytes = best.read_bytes()
@@ -1782,6 +1954,16 @@ class Stage8V2CheckpointTests(unittest.TestCase):
             with self.assertRaisesRegex(FileNotFoundError, "best companion"):
                 resume(last, **kwargs)
             best.write_bytes(best_bytes)
+
+            last_bytes = last.read_bytes()
+            last_value = load_torch_checkpoint(last, mmap=False)
+            last_value["best_companion"]["path"] = str(
+                root / "other" / best.name
+            )
+            torch.save(last_value, last)
+            with self.assertRaisesRegex(ValueError, "same-directory"):
+                resume(last, **kwargs)
+            last.write_bytes(last_bytes)
 
             last_value = load_torch_checkpoint(last, mmap=False)
             last_value["best_companion"]["sha256"] = "0" * 64
@@ -1916,6 +2098,71 @@ class Stage8V2CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("{audit|warmup|train|ablations}", result.stderr)
         self.assertNotIn("cache", result.stderr)
+
+    def test_clean_index_contains_public_stage8_config_and_audit_entrypoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            clean_root = Path(temporary) / "clean"
+            clean_root.mkdir()
+            export = subprocess.run(
+                [
+                    "git", "checkout-index", "--all",
+                    f"--prefix={clean_root}/",
+                ],
+                cwd=self.ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(export.returncode, 0, export.stderr)
+            self.assertTrue((clean_root / "configs/plm_stage8.yaml").is_file())
+            self.assertTrue((clean_root / "source/audit_plm_stage8_data.py").is_file())
+
+    def test_clean_index_stage8_entrypoints_launch_without_uncommitted_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            clean_root = Path(temporary) / "clean"
+            clean_root.mkdir()
+            export = subprocess.run(
+                [
+                    "git", "checkout-index", "--all",
+                    f"--prefix={clean_root}/",
+                ],
+                cwd=self.ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(export.returncode, 0, export.stderr)
+            for script in (
+                "audit_plm_stage8_data.py",
+                "train_plm_stage8.py",
+                "run_plm_stage8_ablations.py",
+                "evaluate_plm_stage8.py",
+                "evaluate_plm_stage8_tcr_sets.py",
+            ):
+                with self.subTest(script=script):
+                    result = subprocess.run(
+                        [
+                            str(self.PYTHON),
+                            str(clean_root / f"source/{script}"),
+                            "--help",
+                        ],
+                        cwd=clean_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+            environment = dict(os.environ)
+            environment["PYTHON_BIN"] = str(self.PYTHON)
+            audit = subprocess.run(
+                ["bash", str(clean_root / "run_stage8.sh"), "audit", "--help"],
+                cwd=clean_root,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(audit.returncode, 0, audit.stderr)
 
 
 

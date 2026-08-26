@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from .artifacts import artifact_timestamp, validate_artifact_timestamp
-from .stage8_config import Stage8ExperimentConfig
+from .stage8_config import Stage8Condition, Stage8ExperimentConfig
 
 
 STAGE8_V2_FORMAT_VERSION = 2
@@ -134,12 +134,15 @@ def atomic_torch_save(payload: Mapping[str, Any], path: str | Path) -> Path:
 
 def _stage8_v2_training_contract(
     config: Stage8ExperimentConfig,
+    effective_data: Mapping[str, Any],
 ) -> dict[str, Any]:
+    effective = _normalise_effective_data(effective_data)
     descriptor = {
         "model": asdict(config.model),
         "stage8": asdict(config.stage8),
         "fold": config.runtime.fold,
         "seed": config.runtime.seed,
+        "effective_data": effective,
     }
     encoded = json.dumps(
         descriptor, sort_keys=True, separators=(",", ":")
@@ -164,11 +167,59 @@ def _normalise_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     return dict(metrics)
 
 
+def _normalise_effective_data(value: Mapping[str, Any]) -> dict[str, Any]:
+    effective = dict(value)
+    required = {"limit_per_type", "train_samples", "validation_samples"}
+    missing = sorted(required - set(effective))
+    if missing:
+        raise ValueError(
+            "Stage-8 effective data is missing: " + ", ".join(missing)
+        )
+    limit = effective["limit_per_type"]
+    if limit is not None and (not isinstance(limit, int) or limit < 1):
+        raise ValueError("Stage-8 effective limit_per_type must be positive or null")
+    for name in ("train_samples", "validation_samples"):
+        if not isinstance(effective[name], int) or effective[name] < 1:
+            raise ValueError(f"Stage-8 effective {name} must be positive")
+    return effective
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value.lower())
+    )
+
+
 def _normalise_stage1_source(source: Mapping[str, Any]) -> dict[str, Any]:
     value = dict(source)
     sha256 = value.get("sha256")
-    if value.get("kind") != "stage1" or not isinstance(sha256, str) or len(sha256) != 64:
+    if value.get("kind") != "stage1" or not _is_sha256(sha256):
         raise ValueError("Stage-8 V2 requires an exact Stage-1 source SHA256")
+    return value
+
+
+def _normalise_stage8a_source(source: Any) -> dict[str, Any]:
+    if not isinstance(source, Mapping):
+        raise ValueError("Stage-8 V2 checkpoint has no valid warmup source")
+    value = dict(source)
+    path = value.get("path")
+    if not isinstance(path, str) or not path or not _is_sha256(value.get("sha256")):
+        raise ValueError("Stage-8 V2 checkpoint has invalid warmup source metadata")
+    if value.get("checkpoint_type") != STAGE8_V2_CHECKPOINT_TYPE:
+        raise ValueError("Stage-8 V2 checkpoint has invalid warmup source type")
+    validate_artifact_timestamp(str(value.get("run_timestamp")))
+    return value
+
+
+def _normalise_best_companion(companion: Any) -> dict[str, Any]:
+    if not isinstance(companion, Mapping):
+        raise ValueError("Stage-8 last checkpoint has no valid best companion")
+    value = dict(companion)
+    path = value.get("path")
+    if not isinstance(path, str) or not path or not _is_sha256(value.get("sha256")):
+        raise ValueError("Stage-8 last checkpoint has invalid best companion metadata")
     return value
 
 
@@ -196,6 +247,7 @@ def _v2_base_checkpoint(
     source_stage1: Mapping[str, Any],
     source_stage8a: Mapping[str, Any] | None,
     dataset_fingerprint: str,
+    effective_data: Mapping[str, Any],
     condition: str | None,
     run_timestamp: str,
     metrics: Mapping[str, Any],
@@ -211,6 +263,7 @@ def _v2_base_checkpoint(
     state = model.state_dict()
     _validate_full_model_state(state)
     source = _normalise_stage1_source(source_stage1)
+    effective = _normalise_effective_data(effective_data)
     if source["sha256"] != config.paths.stage1_sha256:
         raise ValueError(
             "Stage-8 V2 Stage-1 source does not match the configured SHA256"
@@ -225,7 +278,8 @@ def _v2_base_checkpoint(
         "source_stage1": source,
         "source_stage8a": dict(source_stage8a) if source_stage8a else None,
         "dataset_fingerprint": dataset_fingerprint,
-        "training_contract": _stage8_v2_training_contract(config),
+        "effective_data": effective,
+        "training_contract": _stage8_v2_training_contract(config, effective),
         "config": config.to_dict(),
         "training_state": dict(training_state),
         "metrics": _normalise_metrics(metrics),
@@ -260,6 +314,7 @@ def save_stage8_warmup_checkpoint(
     config: Stage8ExperimentConfig,
     source_stage1: Mapping[str, Any],
     dataset_fingerprint: str,
+    effective_data: Mapping[str, Any],
     run_timestamp: str,
     metrics: Mapping[str, Any],
     training_state: Mapping[str, Any] | None = None,
@@ -274,6 +329,7 @@ def save_stage8_warmup_checkpoint(
         source_stage1=source_stage1,
         source_stage8a=None,
         dataset_fingerprint=dataset_fingerprint,
+        effective_data=effective_data,
         condition=None,
         run_timestamp=run_timestamp,
         metrics=metrics,
@@ -293,6 +349,7 @@ def save_stage8_best_checkpoint(
     source_stage1: Mapping[str, Any],
     warmup_checkpoint: str | Path,
     dataset_fingerprint: str,
+    effective_data: Mapping[str, Any],
     run_timestamp: str,
     metrics: Mapping[str, Any],
 ) -> Path:
@@ -310,6 +367,7 @@ def save_stage8_best_checkpoint(
         source_stage1=source,
         source_stage8a=warmup,
         dataset_fingerprint=dataset_fingerprint,
+        effective_data=effective_data,
         condition=_condition_value(trainer.condition),
         run_timestamp=run_timestamp,
         metrics=metrics,
@@ -368,6 +426,7 @@ def save_stage8_last_checkpoint(
     source_stage1: Mapping[str, Any],
     warmup_checkpoint: str | Path,
     dataset_fingerprint: str,
+    effective_data: Mapping[str, Any],
     run_timestamp: str,
     metrics: Mapping[str, Any],
     best_checkpoint: str | Path,
@@ -394,6 +453,7 @@ def save_stage8_last_checkpoint(
         source_stage1=source,
         source_stage8a=warmup,
         dataset_fingerprint=dataset_fingerprint,
+        effective_data=effective_data,
         condition=_condition_value(trainer.condition),
         run_timestamp=run_timestamp,
         metrics=metrics,
@@ -406,6 +466,7 @@ def save_stage8_last_checkpoint(
         ("source_stage1", payload["source_stage1"]),
         ("source_stage8a", payload["source_stage8a"]),
         ("dataset_fingerprint", payload["dataset_fingerprint"]),
+        ("effective_data", payload["effective_data"]),
         ("training_contract", payload["training_contract"]),
     ):
         if best.get(key) != expected:
@@ -431,6 +492,7 @@ def initialise_stage8b_checkpoints(
     source_stage1: Mapping[str, Any],
     warmup_checkpoint: str | Path,
     dataset_fingerprint: str,
+    effective_data: Mapping[str, Any],
     run_timestamp: str,
     metrics: Mapping[str, Any],
 ) -> tuple[Path, Path]:
@@ -447,6 +509,7 @@ def initialise_stage8b_checkpoints(
         source_stage1=source_stage1,
         warmup_checkpoint=warmup_checkpoint,
         dataset_fingerprint=dataset_fingerprint,
+        effective_data=effective_data,
         run_timestamp=run_timestamp,
         metrics=metrics,
     )
@@ -456,6 +519,7 @@ def initialise_stage8b_checkpoints(
         source_stage1=source_stage1,
         warmup_checkpoint=warmup_checkpoint,
         dataset_fingerprint=dataset_fingerprint,
+        effective_data=effective_data,
         run_timestamp=run_timestamp,
         metrics=metrics,
         best_checkpoint=best,
@@ -490,11 +554,53 @@ def validate_stage8_v2_checkpoint(
     _normalise_stage1_source(checkpoint.get("source_stage1", {}))
     if not checkpoint.get("dataset_fingerprint"):
         raise ValueError("Stage-8 V2 checkpoint has no data fingerprint")
+    effective = _normalise_effective_data(checkpoint.get("effective_data", {}))
     if not isinstance(checkpoint.get("training_contract"), Mapping):
         raise ValueError("Stage-8 V2 checkpoint has no training contract")
-    if not isinstance(checkpoint.get("metrics"), Mapping):
+    if checkpoint["training_contract"].get("descriptor", {}).get("effective_data") != effective:
+        raise ValueError("Stage-8 V2 effective data does not match its training contract")
+    metrics = checkpoint.get("metrics")
+    if not isinstance(metrics, Mapping):
         raise ValueError("Stage-8 V2 checkpoint has no metrics")
+    _normalise_metrics(metrics)
+    if not isinstance(checkpoint.get("training_state"), Mapping):
+        raise ValueError("Stage-8 V2 checkpoint has no training state")
     validate_artifact_timestamp(str(checkpoint.get("run_timestamp")))
+
+    optimizer_keys = ("optimizer", "scheduler", "scaler", "rng_state")
+    if role == "warmup":
+        if checkpoint.get("phase") != "stage8a":
+            raise ValueError("Stage-8 warmup checkpoint phase must be stage8a")
+        if checkpoint.get("condition") is not None:
+            raise ValueError("Stage-8 warmup checkpoint condition must be absent")
+        if checkpoint.get("source_stage8a") is not None:
+            raise ValueError("Stage-8 warmup checkpoint cannot have a warmup source")
+        for key in optimizer_keys:
+            if key in checkpoint:
+                raise ValueError(f"Stage-8 warmup checkpoint cannot contain {key}")
+    else:
+        if checkpoint.get("phase") != "stage8b":
+            raise ValueError(f"Stage-8 {role} checkpoint phase must be stage8b")
+        try:
+            Stage8Condition(checkpoint.get("condition"))
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"Stage-8 {role} checkpoint has an invalid condition"
+            ) from error
+        _normalise_stage8a_source(checkpoint.get("source_stage8a"))
+        if role == "best":
+            for key in optimizer_keys:
+                if key in checkpoint:
+                    raise ValueError(f"Stage-8 best checkpoint cannot contain {key}")
+        else:
+            for key in optimizer_keys:
+                if not isinstance(checkpoint.get(key), Mapping):
+                    raise ValueError(f"Stage-8 last checkpoint has no {key} state")
+            _normalise_best_companion(checkpoint.get("best_companion"))
+            if "best_model" in checkpoint:
+                raise ValueError(
+                    "Stage-8 V2 last checkpoint must not duplicate best_model"
+                )
 
 
 def load_stage8_v2_checkpoint(
@@ -515,6 +621,7 @@ def validate_stage8_warmup_for_run(
     config: Stage8ExperimentConfig,
     source_stage1_sha256: str,
     dataset_fingerprint: str,
+    effective_data: Mapping[str, Any],
 ) -> None:
     """Bind a shared warmup artifact to the current source/data/config."""
 
@@ -523,7 +630,7 @@ def validate_stage8_warmup_for_run(
         raise ValueError("Stage-8 warmup Stage-1 source SHA256 mismatch")
     if checkpoint.get("dataset_fingerprint") != dataset_fingerprint:
         raise ValueError("Stage-8 warmup data fingerprint mismatch")
-    expected = _stage8_v2_training_contract(config)
+    expected = _stage8_v2_training_contract(config, effective_data)
     if checkpoint.get("training_contract", {}).get("sha256") != expected["sha256"]:
         raise ValueError("Stage-8 warmup configuration mismatch")
 
@@ -533,6 +640,7 @@ def validate_stage8_v2_for_evaluation(
     *,
     config: Stage8ExperimentConfig,
     dataset_fingerprint: str | None = None,
+    effective_data: Mapping[str, Any] | None = None,
 ) -> None:
     """Validate a public V2 artifact before direct online-model inference."""
 
@@ -544,7 +652,9 @@ def validate_stage8_v2_for_evaluation(
         and checkpoint.get("dataset_fingerprint") != dataset_fingerprint
     ):
         raise ValueError("Stage-8 checkpoint data fingerprint mismatch")
-    expected = _stage8_v2_training_contract(config)
+    expected = _stage8_v2_training_contract(
+        config, effective_data or checkpoint["effective_data"]
+    )
     if checkpoint.get("training_contract", {}).get("sha256") != expected["sha256"]:
         raise ValueError("Stage-8 checkpoint configuration mismatch")
 
@@ -556,6 +666,7 @@ def _validate_resume_identity(
     config: Stage8ExperimentConfig,
     source_stage1_sha256: str,
     dataset_fingerprint: str,
+    effective_data: Mapping[str, Any],
     condition: Any,
 ) -> None:
     if last["source_stage1"]["sha256"] != source_stage1_sha256:
@@ -565,12 +676,14 @@ def _validate_resume_identity(
         raise ValueError("Stage-8 resume condition mismatch")
     if last.get("dataset_fingerprint") != dataset_fingerprint:
         raise ValueError("Stage-8 resume data fingerprint mismatch")
-    expected_contract = _stage8_v2_training_contract(config)
+    if last.get("effective_data") != _normalise_effective_data(effective_data):
+        raise ValueError("Stage-8 resume effective data mismatch")
+    expected_contract = _stage8_v2_training_contract(config, effective_data)
     if last.get("training_contract", {}).get("sha256") != expected_contract["sha256"]:
         raise ValueError("Stage-8 resume configuration mismatch")
     for key in (
         "run_timestamp", "condition", "source_stage1", "source_stage8a",
-        "dataset_fingerprint", "training_contract",
+        "dataset_fingerprint", "effective_data", "training_contract",
     ):
         if best.get(key) != last.get(key):
             raise ValueError(f"Stage-8 best companion {key} mismatch")
@@ -589,6 +702,8 @@ def _validate_resume_identity(
         raise ValueError("Stage-8 resume warmup Stage-1 source mismatch")
     if warmup.get("dataset_fingerprint") != dataset_fingerprint:
         raise ValueError("Stage-8 resume warmup data fingerprint mismatch")
+    if warmup.get("effective_data") != _normalise_effective_data(effective_data):
+        raise ValueError("Stage-8 resume warmup effective data mismatch")
     if warmup.get("training_contract", {}).get("sha256") != expected_contract["sha256"]:
         raise ValueError("Stage-8 resume warmup configuration mismatch")
 
@@ -596,10 +711,12 @@ def _validate_resume_identity(
 def resume_stage8_last_checkpoint(
     checkpoint_path: str | Path,
     *,
+    checkpoint: Mapping[str, Any] | None = None,
     trainer,
     config: Stage8ExperimentConfig,
     source_stage1_sha256: str,
     dataset_fingerprint: str,
+    effective_data: Mapping[str, Any],
     condition: Any,
 ) -> dict[str, Any]:
     """Validate one same-run V2 last/best pair and restore online training."""
@@ -608,7 +725,11 @@ def resume_stage8_last_checkpoint(
     timestamp = artifact_timestamp(last_path, "stage8_last.pt")
     if timestamp is None:
         raise ValueError("Stage-8 resume requires stage8_last_<timestamp>.pt")
-    last = load_stage8_v2_checkpoint(last_path, artifact_role="last")
+    if checkpoint is None:
+        last = load_stage8_v2_checkpoint(last_path, artifact_role="last")
+    else:
+        validate_stage8_v2_checkpoint(checkpoint, artifact_role="last")
+        last = checkpoint
     if last.get("run_timestamp") != timestamp:
         raise ValueError("Stage-8 last filename and run timestamp mismatch")
     best_path = last_path.parent / f"stage8_best_{timestamp}.pt"
@@ -619,8 +740,8 @@ def resume_stage8_last_checkpoint(
     companion = last.get("best_companion")
     if not isinstance(companion, Mapping):
         raise ValueError("Stage-8 last checkpoint has no best companion metadata")
-    recorded_best = Path(str(companion.get("path", "")))
-    if recorded_best.name != best_path.name:
+    recorded_best = Path(str(companion.get("path", ""))).expanduser().resolve()
+    if recorded_best != best_path:
         raise ValueError(
             "Stage-8 resume requires the same-directory, same-timestamp best companion"
         )
@@ -633,6 +754,7 @@ def resume_stage8_last_checkpoint(
         config=config,
         source_stage1_sha256=source_stage1_sha256,
         dataset_fingerprint=dataset_fingerprint,
+        effective_data=effective_data,
         condition=condition,
     )
     for key in ("optimizer", "scheduler", "scaler", "rng_state"):

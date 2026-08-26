@@ -158,16 +158,22 @@ def initialise_stage8_from_stage1(
 
     if expected_sha256 is None:
         raise ValueError("Stage-8 expected SHA256 is required")
-    return initialise_binding_from_stage1(
-        model.binding_model,
-        checkpoint_path,
-        model_config=model_config,
-        fold=fold,
-        seed=seed,
-        encoder_metadata=model.encoder_metadata(),
-        expected_sha256=expected_sha256,
-        require_joint_checkpoint=True,
-    )
+    try:
+        return initialise_binding_from_stage1(
+            model.binding_model,
+            checkpoint_path,
+            model_config=model_config,
+            fold=fold,
+            seed=seed,
+            encoder_metadata=model.encoder_metadata(),
+            expected_sha256=expected_sha256,
+            require_joint_checkpoint=True,
+        )
+    except (ValueError, RuntimeError) as error:
+        message = str(error).replace("Stage-3", "Stage-8").replace(
+            "Stage 3", "Stage-8"
+        )
+        raise type(error)(message) from error
 
 
 def build_progressive_stage8_model(
