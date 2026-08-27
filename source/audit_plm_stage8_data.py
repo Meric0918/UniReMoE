@@ -5,7 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
+
+# The audit entrypoint can be launched after a process or shell has selected
+# Intel MKL while the environment provides GNU OpenMP (libgomp).  Normalize
+# that incompatible combination before importing numpy through stage8_data.
+if os.environ.get("MKL_THREADING_LAYER") == "INTEL":
+    os.environ["MKL_THREADING_LAYER"] = "GNU"
 
 from plm_unified.stage8_config import apply_stage8_overrides, load_stage8_config
 from plm_unified.stage8_data import audit_stage8_class_dirs

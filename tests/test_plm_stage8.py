@@ -2154,6 +2154,9 @@ class Stage8V2CliTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
             environment = dict(os.environ)
             environment["PYTHON_BIN"] = str(self.PYTHON)
+            # Reproduce the Intel MKL setting that can be inherited after
+            # another test has loaded a GNU OpenMP runtime.
+            environment["MKL_THREADING_LAYER"] = "INTEL"
             audit = subprocess.run(
                 ["bash", str(clean_root / "run_stage8.sh"), "audit", "--help"],
                 cwd=clean_root,
@@ -2163,6 +2166,24 @@ class Stage8V2CliTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(audit.returncode, 0, audit.stderr)
+
+
+class Stage8PublicCacheFlowTests(unittest.TestCase):
+    def test_stage8_cache_entrypoints_are_removed_but_stage10_cache_support_remains(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for relative in (
+            "source/precompute_plm_stage8_embeddings.py",
+            "source/export_plm_stage8_full.py",
+            "source/plm_unified/stage8_precompute.py",
+        ):
+            with self.subTest(relative=relative):
+                self.assertFalse((root / relative).is_file())
+
+        from source.plm_unified.stage8_data import open_stage8_caches
+        from source.plm_unified.stage10_precompute import precompute_stage10_caches
+
+        self.assertTrue(callable(open_stage8_caches))
+        self.assertTrue(callable(precompute_stage10_caches))
 
 
 

@@ -1,0 +1,21 @@
+Stage1：从基础序列模型开始，冻结 PLM，训练 PH/PT Adapter 与下游分支
+Stage2：继承 Stage1，渐进解冻 PLM 顶层
+Stage3：与 Stage1 同源，增加顺序式 PHT 分支和 triplet-first 训练
+Stage4：在 Stage3 结构上将 pHLA/TCR 交互改为双向
+Stage5：保持 Stage3 结构，改为三任务同步训练
+Stage6：诊断 Stage5 的 PH 覆盖率与多任务梯度冲突
+Stage7：验证 PHT 是否真正使用 HLA 条件信息
+Stage8：与 Stage3 同层、同从 Stage1 初始化；四类型 PHT joint 训练，并新增 PH/PHT hierarchy 与 PT/PHT implication 约束
+Stage9：在 Stage3 基础上对三种 embedding 做 CLIP 对比学习
+Stage10：保留 Stage3 作为教师，使用 KL 约束缓解 Stage8 的 PT 遗忘
+
+```text
+Stage 1 best_joint
+├── Stage 3A → Stage 3B
+│   ├── Stage 4：双向 PHT 交互消融
+│   └── Stage 5 → Stage 6：三任务诊断
+├── Stage 7：HLA 条件信息分析
+├── Stage 8A → Stage 8B：四类型约束训练
+│   └── Stage 10：以 Stage 3 为教师的 PT 遗忘缓解
+└── Stage 9：embedding 对比学习
+```
