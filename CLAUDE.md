@@ -4,89 +4,120 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-UnifyImmun predicts antigen binding specificity to **both HLA and TCR** with a single unified cross-attention model. The active line of work (branch `PLM`) is a **new additive PLM stage-1 pipeline** that sits alongside the legacy scripts: it trains adapter layers over **frozen** residue-level embeddings from ESM-C (peptide/HLA) and TCR-BERT (TCR), with module-targeted FGM adversarial training and a two-phase progressive schedule (1A warm-up → 1B alternating dual-task). The legacy `run_all_phases.py` / `HLA_test.py` / `TCR_test.py` scripts referenced in README.md are **not present** in this branch — do not invent them; the PLM pipeline is the one that exists.
+UnifyImmun predicts peptide binding to **HLA (PH / pHLA)**, **TCR (PT / pTCR)** and the **peptide-HLA-TCR triple (PHT)** on top of frozen protein-language-model residue embeddings: ESM-C for peptide/HLA, TCR-BERT for the TCR CDR3.
 
-`PLM_STAGE1.md` is the authoritative runbook for the PLM pipeline (cache construction, debug training, three-seed experiments, resume, evaluation, SwanLab). Read it before changing training flow.
+Work is organised as a series of **independent "stage" experiments**. Each stage is its own pipeline — own YAML config, own entry scripts in `source/`, own modules in `source/plm_unified/`, own tests directory, own runbook in the repo root. Stages are added *beside* earlier ones and must not modify, overwrite or re-train them; several runbooks state this explicitly.
+
+The legacy `run_all_phases.py` / `HLA_test.py` / `TCR_test.py` / `*_output_score.py` scripts named in README.md are **not present in this repo** — do not invent them.
+
+## Stage map
+
+Each stage has a root-level runbook (`PLM_STAGE<X>.md`, mostly Chinese). **Read the relevant runbook before touching a stage's code or training flow** — it is authoritative for commands, conditions, checkpoint contracts and acceptance evidence.
+
+| Stage | Summary |
+|---|---|
+| 1 | Base PH/PT dual-task model: per-residue adapters over a frozen HDF5 cache, one shared peptide adapter, phase 1A warm-up then 1B alternating tasks with module-targeted FGM. Most later stages initialise from its `best_joint`. |
+| 1_encoder | Stage 1 variant replacing the MLP adapters with 3-layer/8-head Transformer encoders |
+| 2 | Progressive unfreezing of top ESM-C / TCR-BERT blocks with discriminative LRs, starting from a Stage 1 `last` checkpoint |
+| 3 | Adds an explicit PHT triplet branch (`triplet_*` modules, `train_plm_triplet.py`) |
+| 5 / 6 / 7 | Joint three-task training with frozen PLMs; PH-coverage + task-conflict ablation; read-only evaluation of the HLA-conditioning gain over Stage 1 |
+| 8 | Four-type constrained PHT training from Stage 1 `best_joint`, data in `dataset/PHT/classes/PHT_{000,010,100,111}`. The most-reused base for later branches. |
+| 9 | Pairwise TCR contrastive ranking within one pHLA, from a Stage 3 `triplet_best` |
+| 10 / 12 | Teacher-student anti-forgetting (frozen Stage 3 teacher, KD on PH/PT); Stage8-aligned constrained retraining |
+| 11 | Two-level contrastive learning over the sequential PHT path, trained from scratch |
+| 13 | GraphSAGE fusion on the Stage 1 dual-task model |
+| 14 / 15 | Hyper-PMT heterogeneous-hypergraph fusion on the Stage 8 contract; the same Shared Hyper-PMT dropped into Stage 1's PH/PT contract |
+| 16 / 17 / 18 | The three "priority" experiments: independent PT validation splits in model selection with degradation gates; frozen-PLM gradient isolation; stronger PT replay + Stage 1 teacher retention. They share `stage16_{config,data,evaluation,selection,trainer,checkpoint,pipeline}.py` on purpose, so comparison rules cannot drift. See `STAGE16_18_IMPLEMENTATION.md` for how to run them. |
+| adapter / PHT | Adapter and random-sequence-encoder variants of the two-level PHT cross-attention path |
+| MOE / MOE_PT / MOE_consis | MoE experts replacing the interaction FFNs (v1); residue-level PT→PHT gated fusion (v2); four-class triplet consistency constraints |
+| final | Combines `stage_MOE_PT` fusion with `stage_MOE_consis` auxiliary/consistency losses; frozen PLMs, downstream randomly initialised, joint or sequential training |
+
+`train_plm_stage8_pt_retention.py` is an older combination prototype — not a substitute for the Stage 16/17/18 entry points.
 
 ## Environment
 
-- Python 3.10, CUDA PyTorch. Server-local model checkpoints are referenced by absolute path in the YAML:
-  - ESM-C: `/home/mjp/model/ESMC-300M` (hidden 960)
-  - TCR-BERT: `/home/mjp/model/TCR-Bert` (hidden 768)
-- `requirements-plm.txt` is the **PLM-pipeline** dependency set (not `requirements.txt`). It pins `transformers @ git+https://github.com/Biohub/transformers.git@3a8956fb...` — this fork is required for ESM-C and must match the checkpoint's exported version. Install: `pip install -r requirements-plm.txt` (after a CUDA torch build is already present).
+- Python 3.10, CUDA PyTorch (2.2.1 upstream). Server-local checkpoints, referenced by absolute path in the YAML: ESM-C `/home/mjp/model/ESMC-300M` (hidden 960), TCR-BERT `/home/mjp/model/TCR-Bert` (hidden 768).
+- `requirements-plm.txt` is the dependency set for these pipelines (**not** `requirements.txt`). It pins a `transformers` git fork that ESM-C requires and that must match the checkpoint's exported version. Install after a CUDA torch build is already present.
+- Server runs use the `unifyimmun` conda env with `OMP_NUM_THREADS=2` and `MKL_THREADING_LAYER=GNU`.
+- `data/`, `trained_model/`, `embedding_cache/`, `swanlog/`, `logs/`, `analysis_results/` are gitignored. `.gitignore` is allowlist-style (`*` then `!*.ext`), so a new file type needs an explicit `!` rule to be trackable.
 
 ## Common commands
 
-All entry-point scripts live in `source/` and resolve their own default config (`configs/plm_stage1.yaml`), so they run from anywhere. Config paths in the YAML are relative to `paths.project_root` (`..`), i.e. the repo root.
+Run entry scripts **from the repo root**. Each resolves its own default config under `configs/`, and paths inside the YAML are relative to `paths.project_root` (`..`), i.e. the repo root.
+
+Stage 1 (the pattern the other stages follow — verify checkpoints, build cache, debug, seeds, resume, evaluate):
 
 ```bash
-# 1. Verify local checkpoints + tokenizer residue alignment (run before any training)
 python source/smoke_test_plm_encoders.py --config configs/plm_stage1.yaml --device cuda
-
-# 2. Build the residue-level HDF5 cache (fold 1 train+val by default; ~21 GB float16)
 python source/precompute_plm_embeddings.py --config configs/plm_stage1.yaml --fold 1 --device cuda
-#    Rebuild explicitly with --overwrite; rebuild subset with --entities peptide hla
-
-# 3. Debug training (small row limit, in-process cache reads, local SwanLab)
 python source/train_plm_stage1.py --config configs/plm_stage1.yaml --fold 1 --seed 9999 \
   --limit 4096 --num-workers 0 --swanlab-mode local
-#    Online (no-cache) debug: add --no-cache --limit 256 (uses training.online_batch_size)
-
-# 4. Full three-seed experiment (subprocesses, one per seed)
 python source/run_plm_stage1_seeds.py --config configs/plm_stage1.yaml --fold 1 \
   --seeds 42 3407 2026 --device cuda --swanlab-mode online
-
-# 5. Resume from a checkpoint
 python source/train_plm_stage1.py --config configs/plm_stage1.yaml --fold 1 --seed 42 \
   --resume trained_model/PLM_Unified/fold_1/seed_42/last.pt
-
-# 6. Evaluate a checkpoint on configured HLA/TCR splits
 python source/evaluate_plm_stage1.py --config configs/plm_stage1.yaml --fold 1 --seed 42
 ```
 
-### Conventions enforced by the runbook
+Later stages expose the same verbs through `source/{audit,precompute,train,evaluate,analyze,run}_plm_stage<X>*.py`, and several have a `run_stage<X>.sh` wrapper that dispatches subcommands:
 
-- `--limit` is **smoke-test only**; never use it for real experiments.
-- Debug seed is **9999** — it must not collide with the experiment seeds **42 / 3407 / 2026**.
-- `--num-workers 0` keeps HDF5 cache reads in the main process to ease data-issue debugging.
-- Evaluating new splits (independent/external/covid/triple): first add the split to `cache.hla_splits` / `cache.tcr_splits`, rebuild the cache, then pass `--hla-split` / `--tcr-split`. All test sets in fixed-width cache at once can exceed 30 GB — build per disk budget.
-- Mixed precision is `bf16`; autocast is only enabled on CUDA.
+```bash
+./run_stage8.sh audit      # then: warmup | train | ablations
+python source/train_plm_stage16.py --dry-run
+```
+
+**Always run the stage's `audit_plm_stage<X>_data.py` (or `./run_stage<X>.sh audit`) before training it** — the audits validate class directories, labels, duplicate/conflicting triples, sequence lengths and amino-acid alphabets, and abort on conflicts.
+
+### Conventions enforced by the runbooks
+
+- `--limit` is smoke-test only; never use it for a real experiment.
+- Debug seed is **9999**; experiment seeds are **42 / 3407 / 2026**. They must not collide.
+- `--num-workers 0` keeps HDF5 cache reads in the main process, which makes data problems debuggable.
+- Mixed precision is `bf16`, autocast only on CUDA.
+- To evaluate a new split, add it to the config's `*_splits`, rebuild the cache, then pass `--hla-split` / `--tcr-split`. Fixed-width caches are large (tens of GB for all test sets at once) — build per disk budget, and rebuild explicitly with `--overwrite`.
+- Cache dtype, shard size and precompute batch size belong under `cache:` in the YAML, never in code.
+- Don't start a formal (multi-round, multi-seed) training run on your own; runbooks are explicit that implementation work stops short of launching them.
 
 ## Tests
 
-Tests are synthetic (no real checkpoints / no GPU needed) and import via the `source.` package path, so run them from the **repo root**:
+Tests are synthetic — no real checkpoints, no GPU. Two import styles coexist, and both require the repo root as cwd:
 
 ```bash
-python -m unittest tests.test_plm_unified          # or: python -m pytest tests/
+python -m pytest tests/                               # whole suite
+python -m unittest tests.stage1.test_plm_unified      # one module (dotted path)
+python -m pytest tests/stage8/test_plm_stage8.py      # one file
+python -m pytest tests/stage8/test_plm_stage8.py -k benchmark
 ```
 
-## Architecture (PLM pipeline)
+Older tests import `source.plm_unified.<module>`; the Stage 16-18 tests insert `source/` on `sys.path` and import `plm_unified.<module>` via `tests/stage16_18_helpers.py` (which also provides the `fixture(stage, condition)` factory of tiny deterministic encoders). Match the style of the directory you are adding to. `tests/<stage>/` also holds dated result markdown and benchmark output — those are records, not fixtures.
 
-`source/plm_unified/` is the pipeline package; `source/*.py` are thin CLI entry points that wire YAML → config → the modules below.
+## Shared architecture
 
-- **`config.py`** — Typed dataclasses (`PathsConfig`, `ModelConfig`, `CacheConfig`, `TrainingConfig`, `SwanLabConfig`, `ExperimentConfig`) with `load_config` (YAML→dataclass) and `apply_overrides` (CLI flags). `ExperimentConfig` also derives `cache_dir()` / `run_dir()` (per-fold, per-seed) and validates that model checkpoints exist.
-- **`encoders.py`** — Frozen residue-level encoders (`ESMCResidueEncoder`, `TCRBertResidueEncoder`) plus `OnlineEncoderBundle` (used when `--no-cache`). `checkpoint_fingerprint` hashes checkpoint file structure (sizes + small text/safetensors samples) — **not** the multi-GB weights — so cache validity can be tracked cheaply.
-- **`cache.py`** — Sharded, fixed-width HDF5 residue cache with a **SQLite sequence index**. `EmbeddingCacheWriter` writes shards; `EmbeddingCache` reads them back by sequence key via `CacheLocator(shard, row, length)`. Has a `MANIFEST_VERSION`; rebuilding requires `--overwrite`.
-- **`data.py`** — CSV discovery (`split_path` maps task/split/fold → `data/data_HLA` or `data/data_TCR` files), sequence normalization, and `make_cached_dataloader` / `make_online_dataloader`. `Task = Literal["phla", "ptcr"]`.
-- **`attention.py`** — `SequenceAdapter` (Linear→GELU→Dropout→Linear→LayerNorm, masked fill), `CrossAttentionBlock` (4-head `nn.MultiheadAttention`), `MaskedAttentionPooling`, `BindingClassifier`.
-- **`model.py`** — `UnifiedBindingModel`: **one shared Peptide Adapter** + two receptor Adapters (HLA, TCR) + two cross-attention branches + two classifier heads. Single `forward(task, peptide, p_mask, receptor, r_mask)` returns `BindingOutput(logits, cross_attention, pooling_weights)`.
-- **`fgm.py`** — `ModuleFGM`: old-style per-parameter Fast Gradient Method that attacks only **explicitly selected modules** (in 1B, the current task's Peptide Adapter + receptor Adapter), with BN state handling and backup/restore.
-- **`trainer.py`** — `Stage1Trainer` implementing the two-phase schedule: 1A `warmup` (per-task epochs, no FGM) → writes `warmup_last.pt` → 1B `stage1b` (pHLA/pTCR alternate per epoch with module-targeted FGM). Tracks `best_joint_score` = `(pHLA AUROC + pHLA AUPR + pTCR AUROC + pTCR AUPR)/4`, early-stops after `max_rounds` or `early_stopping_patience` consecutive rounds with < `early_stopping_min_delta` improvement. Checkpoints: `warmup_last.pt`, `last.pt`, `best_joint.pt`. Also exports `set_global_seed`, `build_optimizer`/`build_scheduler`, `resolve_device`, `load_training_checkpoint`, `peek_swanlab_run_id`.
-- **`metrics.py`** — `BinaryMetrics` (loss, AUROC, AUPR, ACC, MCC, F1, precision/recall/sensitivity/specificity) + `joint_score` / `prefixed_metrics` helpers (sklearn-backed).
-- **`evaluation.py`** — `evaluate_model`: standalone inference-mode loop with autocast, shared by the eval CLI.
-- **`tracking.py`** — `SwanLabTracker`: thin adapter that stays import-free when `mode="disabled"` (so tests/CPU runs don't require swanlab). Default project `unifyimmun`, group `plm-stage1-fold{fold}`, experiment `PLM-Stage1-fold{f}-seed{s}`.
+`source/plm_unified/` holds everything; `source/*.py` are thin CLI wrappers that turn YAML into a config dataclass and drive the modules. Within the package, imports are relative (`from .stage8_config import ...`).
+
+Shared foundation, used by nearly every stage:
+
+- **`config.py`** — typed dataclasses (`PathsConfig`, `ModelConfig`, `CacheConfig`, `TrainingConfig`, `SwanLabConfig`, `ExperimentConfig`) plus `load_config` and `apply_overrides`; derives per-fold/per-seed `cache_dir()` / `run_dir()` and validates that checkpoints exist. Each stage adds `stage<X>_config.py` with its own conditions and validation.
+- **`encoders.py`** — frozen `ESMCResidueEncoder` / `TCRBertResidueEncoder`, `OnlineEncoderBundle` for `--no-cache`, and `checkpoint_fingerprint`, which hashes checkpoint *structure* (file sizes plus small samples) rather than the multi-GB weights.
+- **`cache.py`** — sharded fixed-width HDF5 residue cache with a SQLite sequence index; `EmbeddingCacheWriter` / `EmbeddingCache` + `CacheLocator(shard, row, length)`, and a `MANIFEST_VERSION`.
+- **`data.py`** — CSV split discovery (`split_path` maps task/split/fold onto the files under `dataset/`), sequence normalisation, cached and online dataloaders; `Task = Literal["phla", "ptcr"]`.
+- **`attention.py` / `model.py`** — `SequenceAdapter`, `CrossAttentionBlock`, `MaskedAttentionPooling`, `BindingClassifier`; `UnifiedBindingModel` = one shared peptide adapter + HLA/TCR adapters + two cross-attention branches + two heads, with a single `forward(task, peptide, p_mask, receptor, r_mask)` returning `BindingOutput(logits, cross_attention, pooling_weights)`.
+- **`fgm.py`** — `ModuleFGM`, per-parameter FGM restricted to explicitly selected modules (in 1B: the current task's peptide adapter + receptor adapter), with backup/restore and BN handling.
+- **`trainer.py`** — `Stage1Trainer` (1A `warmup` → `warmup_last.pt`, then 1B alternating with FGM), selection on `best_joint_score` = mean of PH AUROC/AUPR and PT AUROC/AUPR, early stopping on `max_rounds` / patience / `min_delta`, checkpoints `warmup_last.pt` / `last.pt` / `best_joint.pt`. Also exports the shared `set_global_seed`, `build_optimizer`, `build_scheduler`, `resolve_device`, `load_training_checkpoint`, `peek_swanlab_run_id`.
+- **`metrics.py` / `evaluation.py`** — `BinaryMetrics` (loss, AUROC, AUPR, ACC, MCC, F1, precision/recall/sensitivity/specificity) with `joint_score` / `prefixed_metrics`; `evaluate_model` is the shared inference loop.
+- **`tracking.py`** — `SwanLabTracker`, import-free when `mode="disabled"` so CPU runs and tests need no swanlab. Default project `unifyimmun`, per-fold group, experiment named per fold/seed.
+- **`artifacts.py`** — timestamped artifact names (`create_artifact_timestamp` / `validate_artifact_timestamp`), so checkpoints and result files carry run identity.
+
+A stage then adds its own `stage<X>_{config,data,model,loss,trainer,checkpoint,evaluation}.py` subset. Follow that naming when adding a stage, and keep the new files isolated from existing ones.
 
 ### Data layout
 
-- `data/data_HLA/*.csv` — pHLA splits: `{train,val}_fold_{1..5}.csv` plus `{dataset,independent,external,HPV,neoantigen}_set.csv`. Columns include `peptide` and `HLA`.
-- `data/data_TCR/*.csv` — pTCR splits: same fold pattern plus `{covid,independent,triple}_set.csv`. Columns include `tcr` (CDR3), `peptide`, `HLA`.
-- `data/data_dict.npy` — legacy lookup table.
-- `embedding_cache/plm_stage1/fold_{fold}/{peptide,hla,tcr}/` — built caches (gitignored).
-- `trained_model/PLM_Unified/fold_{fold}/seed_{seed}/` — checkpoints + `seed_summary.json` (gitignored).
-- `swanlog/` — SwanLab run logs (gitignored).
+- `dataset/` — the current data root (`paths.data_root`), e.g. `dataset/PHT/classes/PHT_{000,010,100,111}/{train,val}.csv` for Stage 8 and its descendants. `dataset/README.md` is the split-audit report (entity-level split, seed, row counts, unseen-peptide/HLA/TCR/pair/triple splits).
+- `data/data_HLA/*.csv`, `data/data_TCR/*.csv` — legacy fold-based splits (`{train,val}_fold_{1..5}.csv` plus `{dataset,independent,external,HPV,neoantigen}_set.csv` and `{covid,independent,triple}_set.csv`); columns `peptide`, `HLA`, `tcr`. Not checked in.
+- `embedding_cache/plm_stage<X>/...`, `trained_model/<StageName>/fold_{f}/seed_{s}/`, `swanlog/` — generated, gitignored.
 
 ## Conventions
 
-- Code is typed (`from __future__ import annotations`, dataclasses, `Literal` types); match this style in new code.
-- Paths in the YAML are relative to `paths.project_root` and resolved through `Path` — never hardcode absolute paths in modules (only the two model checkpoints are absolute, as server-local defaults in the config dataclasses).
-- Cache dtype, shard size, and precompute batch size live under `cache:` in the YAML, not in code.
+- Code is typed: `from __future__ import annotations`, dataclasses, `Literal`. Match that style.
+- Never hardcode absolute paths in modules — resolve through `Path` against `paths.project_root`. The two PLM checkpoints are the only absolute paths, and they live in the config.
+- When a change would alter an existing stage's behaviour, add a new stage instead. Checkpoints, configs and recorded results of finished stages are evidence for the paper and are treated as immutable.
