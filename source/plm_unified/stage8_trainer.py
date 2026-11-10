@@ -28,6 +28,7 @@ from .stage8_evaluation import (
     evaluate_stage8_model,
 )
 from .stage8_loss import compute_stage8_loss
+from .metrics import compute_binary_metrics
 from .trainer import build_scheduler
 
 
@@ -39,7 +40,11 @@ def build_stage8_optimizer(model, config: Stage8ExperimentConfig) -> torch.optim
         parameters = [parameter for module in modules for parameter in module.parameters()]
         groups.append({"name": name, "params": parameters, "lr": lr})
 
-    add("adapters", (model.peptide_adapter, model.hla_adapter, model.tcr_adapter), values.adapter_lr)
+    add(
+        "sequence_encoders",
+        (model.peptide_encoder, model.hla_encoder, model.tcr_encoder),
+        values.sequence_encoder_lr,
+    )
     add("pretrained_attention", (
         model.phla_cross_attention, model.ptcr_cross_attention,
         model.phla_pooling, model.ptcr_pooling,
@@ -70,8 +75,8 @@ def validate_stage8_online_trainer_contract(
         "micro_batch_size": 4,
         "gradient_accumulation_steps": 16,
         "min_rounds": 5,
-        "max_rounds": 15,
-        "early_stopping_patience": 5,
+        "max_rounds": 100,
+        "early_stopping_patience": 20,
         "early_stopping_min_delta": 1e-4,
         "constraint_ramp_epochs": 5,
         "pht_score_weight": 0.4,
@@ -130,13 +135,17 @@ def build_stage8_online_optimizer(
         add_encoder("hla", model.hla_encoder, model.hla_unfrozen_layers)
         add_encoder("tcr", model.tcr_encoder, model.tcr_unfrozen_layers)
         add(
-            "adapters",
+            "sequence_encoders",
             (
                 parameter
-                for module in (binding.peptide_adapter, binding.hla_adapter, binding.tcr_adapter)
+                for module in (
+                    binding.peptide_encoder,
+                    binding.hla_encoder,
+                    binding.tcr_encoder,
+                )
                 for parameter in module.parameters()
             ),
-            values.adapter_lr,
+            values.sequence_encoder_lr,
         )
         add(
             "pretrained_attention",
@@ -176,6 +185,24 @@ def _online_batch_samples(batch: Mapping[str, Any]) -> int:
         if isinstance(value, list):
             return len(value)
     raise ValueError("Could not infer Stage-8 online batch size")
+
+
+def _online_training_metrics(
+    labels: list[np.ndarray], probabilities: list[np.ndarray], loss: float
+) -> dict[str, float]:
+    """Summarize one online training pass for the live training monitor."""
+
+    y_true = np.concatenate(labels).astype(np.int64, copy=False)
+    y_score = np.concatenate(probabilities).astype(np.float64, copy=False)
+    if len(np.unique(y_true)) < 2:
+        # AUROC/AUPR are undefined for a one-class pass; keep loss usable.
+        return {"loss": float(loss)}
+    metrics = compute_binary_metrics(y_true, y_score, loss=loss)
+    return {
+        "loss": metrics.loss,
+        "auroc": metrics.auroc,
+        "aupr": metrics.aupr,
+    }
 
 
 def _slice_online_batch(batch: Mapping[str, Any], size: int) -> dict[str, Any]:
@@ -658,7 +685,7 @@ class Stage8OnlineTrainer:
         *,
         phase: Stage8OnlinePhase,
         epoch_or_round: int,
-    ) -> dict[str, float | int]:
+    ) -> dict[str, Any]:
         self.model.set_trainable_stage8("joint", phase)
         self.pass_history.append((phase, epoch_or_round, "joint"))
         loader = self.train_loaders["joint"]
@@ -672,6 +699,8 @@ class Stage8OnlineTrainer:
         optimizer_steps = 0
         hierarchy_lambda = 0.0
         pt_implication_lambda = 0.0
+        labels_seen = {task: [] for task in ("pht", "phla", "ptcr")}
+        probabilities_seen = {task: [] for task in ("pht", "phla", "ptcr")}
         for batch_index, batch in enumerate(loader, start=1):
             window_start = ((batch_index - 1) // accumulation) * accumulation + 1
             window_size = min(accumulation, total_batches - window_start + 1)
@@ -701,6 +730,17 @@ class Stage8OnlineTrainer:
                     phla_weight=0.0 if phase == "stage8a" else self.config.stage8.phla_loss_weight,
                     ptcr_weight=0.0 if phase == "stage8a" else self.config.stage8.ptcr_loss_weight,
                 )
+            for task, label_key, logits in (
+                ("pht", "pht_labels", output.pht_logits),
+                ("phla", "ph_labels", output.phla_logits),
+                ("ptcr", "pt_labels", output.ptcr_logits),
+            ):
+                labels_seen[task].append(
+                    labels[label_key].detach().cpu().numpy()
+                )
+                probabilities_seen[task].append(
+                    torch.softmax(logits.detach(), dim=-1)[:, 1].float().cpu().numpy()
+                )
             self.scaler.scale(loss.total / window_size).backward()
             count = int(labels["pht_labels"].shape[0])
             samples += count
@@ -717,15 +757,25 @@ class Stage8OnlineTrainer:
                 optimizer_steps += 1
         if not samples:
             raise RuntimeError("Stage-8 online joint loader is empty")
+        task_metrics = {
+            task: _online_training_metrics(
+                labels_seen[task], probabilities_seen[task],
+                totals[loss_name] / samples,
+            )
+            for task, loss_name in (
+                ("pht", "pht"), ("phla", "phla"), ("ptcr", "ptcr")
+            )
+        }
         return {
             **{name: value / samples for name, value in totals.items()},
             "samples": samples,
             "optimizer_steps": optimizer_steps,
             "hierarchy_lambda": hierarchy_lambda,
             "pt_implication_lambda": pt_implication_lambda,
+            "task_metrics": task_metrics,
         }
 
-    def _train_replay(self, task: Literal["phla", "ptcr"], round_index: int) -> dict[str, float | int]:
+    def _train_replay(self, task: Literal["phla", "ptcr"], round_index: int) -> dict[str, Any]:
         self.model.set_trainable_stage8(task, "stage8b")
         self.pass_history.append(("stage8b", round_index, task))
         max_samples = self._replay_samples(task)
@@ -737,6 +787,8 @@ class Stage8OnlineTrainer:
         samples = 0
         loss_sum = 0.0
         optimizer_steps = 0
+        labels_seen: list[np.ndarray] = []
+        probabilities_seen: list[np.ndarray] = []
         for batch_index, batch in enumerate(
             _iter_capped_online_batches(self.train_loaders[task], max_samples), start=1
         ):
@@ -750,6 +802,10 @@ class Stage8OnlineTrainer:
                     task, batch["peptide_sequences"], batch["receptor_sequences"]
                 )
                 loss = torch.nn.functional.cross_entropy(output.logits, labels)
+            labels_seen.append(labels.detach().cpu().numpy())
+            probabilities_seen.append(
+                torch.softmax(output.logits.detach(), dim=-1)[:, 1].float().cpu().numpy()
+            )
             self.scaler.scale(loss / window_size).backward()
             count = int(labels.shape[0])
             samples += count
@@ -759,9 +815,14 @@ class Stage8OnlineTrainer:
                 optimizer_steps += 1
         if not samples:
             raise RuntimeError(f"Stage-8 {task} replay loader is empty")
-        return {"loss": loss_sum / samples, "samples": samples, "optimizer_steps": optimizer_steps}
+        metrics = _online_training_metrics(labels_seen, probabilities_seen, loss_sum / samples)
+        return {
+            **metrics,
+            "samples": samples,
+            "optimizer_steps": optimizer_steps,
+        }
 
-    def train_stage8a_epoch(self, epoch: int) -> dict[str, float | int]:
+    def train_stage8a_epoch(self, epoch: int) -> dict[str, Any]:
         if self.phase != "stage8a":
             raise RuntimeError("Stage8A has already completed")
         if epoch != self.stage8a_epoch + 1 or epoch > self.config.stage8.stage8a_epochs:
@@ -770,7 +831,7 @@ class Stage8OnlineTrainer:
         self.stage8a_epoch = epoch
         return metrics
 
-    def fit_stage8a(self) -> list[dict[str, float | int]]:
+    def fit_stage8a(self) -> list[dict[str, Any]]:
         return [
             self.train_stage8a_epoch(epoch)
             for epoch in range(self.stage8a_epoch + 1, self.config.stage8.stage8a_epochs + 1)
@@ -784,7 +845,7 @@ class Stage8OnlineTrainer:
         self._build_optimization("stage8b")
         self.phase = "stage8b"
 
-    def train_stage8b_round(self, round_index: int) -> dict[str, dict[str, float | int]]:
+    def train_stage8b_round(self, round_index: int) -> dict[str, dict[str, Any]]:
         self.begin_stage8b()
         if round_index != self.stage8b_round + 1 or round_index > self.config.stage8.max_rounds:
             raise ValueError("Stage8B rounds must run once in ascending order within the budget")
@@ -832,7 +893,7 @@ class Stage8OnlineTrainer:
     def training_state(self) -> dict[str, int | float | str]:
         """State Task 3 can serialize without prescribing its checkpoint format."""
 
-        return {
+        state: dict[str, int | float | str] = {
             "phase": self.phase,
             "stage8a_epoch": self.stage8a_epoch,
             "stage8b_round": self.stage8b_round,
@@ -840,3 +901,7 @@ class Stage8OnlineTrainer:
             "bad_rounds": self.bad_rounds,
             "best_joint": self.best_joint,
         }
+        run_id = getattr(self.tracker, "run_id", None)
+        if run_id:
+            state["swanlab_run_id"] = str(run_id)
+        return state

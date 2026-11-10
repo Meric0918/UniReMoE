@@ -1,0 +1,85 @@
+paths:
+  project_root: ..
+  data_root: ../data
+  output_root: ../trained_model/PLM_Stage9
+  swanlog_root: ../swanlog
+  stage3_checkpoint: ../trained_model/PLM_Triplet/fold_4/seed_2026/triplet_best_20260802_215908_285880.pt
+  esmc_model: /home/mjp/model/ESMC-300M
+  tcr_bert_model: /home/mjp/model/TCR-Bert
+
+model:
+  peptide_input_dim: 960
+  hla_input_dim: 960
+  tcr_input_dim: 768
+  adapter_hidden_dim: 256
+  model_dim: 128
+  num_attention_heads: 4
+  feedforward_dim: 512
+  adapter_dropout: 0.1
+  attention_dropout: 0.1
+  classifier_dropout: 0.2
+  peptide_min_length: 8
+  peptide_max_length: 15
+  hla_max_length: 34
+  tcr_max_length: 34
+
+runtime:
+  fold: 4
+  seed: 2026
+  device: auto
+  num_workers: 2
+  pin_memory: true
+
+stage9:
+  data_subdir: data_stage9
+  pair_filename: pht_pairs_clean.csv
+  supplement_filename: pht_pairs_full_valtest_supplement.csv
+  legacy_triplet_data_subdir: data_triple
+  legacy_triplet_train_filename: train_set.csv
+  legacy_triplet_val_filename: val_set.csv
+  legacy_triplet_test_filename: test_set.csv
+  reject_noncanonical_sequences: true
+  split_seed: 2026
+  train_fraction: 0.8
+  val_fraction: 0.1
+  test_fraction: 0.1
+  ph_balanced_sampling: true
+  micro_batch_size: 4
+  eval_batch_size: 32
+  gradient_accumulation_steps: 16
+  stage9a_epochs: 2
+  min_rounds: 3
+  max_rounds: 10
+  early_stopping_patience: 3
+  early_stopping_min_delta: 0.0001
+  replay_ratio: 0.25
+  temperature: 0.07
+  contrastive_loss_weight: 1.0
+  classification_loss_weight: 1.0
+  legacy_degradation_tolerance: 0.01
+  projection_dim: 128
+  projection_dropout: 0.1
+  # Compatibility fields; Stage9 keeps all PLM encoders frozen.
+  peptide_unfrozen_layers: 0
+  hla_unfrozen_layers: 0
+  tcr_unfrozen_layers: 0
+  # Deprecated compatibility fields; encoder parameters are not optimized.
+  plm_top_lr: 0.000005
+  plm_lower_lr: 0.0000025
+  adapter_lr: 0.000025
+  pretrained_module_lr: 0.00005
+  contrastive_module_lr: 0.0001
+  weight_decay: 0.01
+  scheduler_warmup_ratio: 0.05
+  gradient_clip_norm: 1.0
+  mixed_precision: bf16
+  gradient_checkpointing: true
+  log_every_optimizer_steps: 10
+
+swanlab:
+  project: unifyimmun
+  workspace: null
+  mode: online
+  group: plm-stage9-fold{fold}
+  experiment_prefix: PLM-Stage9
+  tags: [ESMC-300M, TCR-BERT, stage3, paired-contrastive, stage9]

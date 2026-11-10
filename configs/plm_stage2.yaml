@@ -1,23 +1,29 @@
 paths:
   project_root: ..
-  data_root: ../data
-  cache_root: ../embedding_cache/plm_stage1
+  data_root: ../dataset
+  cache_root: ../embedding_cache/plm_stage1_ph_pt
   output_root: ../trained_model/PLM_Unified
   swanlog_root: ../swanlog
   esmc_model: /home/mjp/model/ESMC-300M
   tcr_bert_model: /home/mjp/model/TCR-Bert
+
+cache:
+  # Stage 2 encodes raw sequences online, but uses these split names to
+  # select the benchmark validation files under dataset/PH/PT/benchmarks.
+  hla_splits: [train, val_unseen_hla, val_unseen_pair, val_unseen_peptide]
+  tcr_splits: [train, val_unseen_pair, val_unseen_peptide, val_unseen_tcr]
 
 model:
   peptide_input_dim: 960
   hla_input_dim: 960
   tcr_input_dim: 768
   adapter_hidden_dim: 256
-  model_dim: 128
-  num_attention_heads: 4
-  feedforward_dim: 512
-  adapter_dropout: 0.1
-  attention_dropout: 0.1
-  classifier_dropout: 0.2
+  model_dim: 256
+  num_attention_heads: 8
+  feedforward_dim: 1024
+  adapter_dropout: 0.15
+  attention_dropout: 0.15
+  classifier_dropout: 0.25
   peptide_min_length: 8
   peptide_max_length: 15
   hla_max_length: 34
@@ -32,6 +38,25 @@ training:
   pin_memory: true
   persistent_workers: false
   device: auto
+  # Keep Stage-2 downstream optimisation aligned with the active Stage-1
+  # contract; Stage-2-specific batch/round settings remain below.
+  no_decay_bias_and_norm: true
+  shared_peptide_adapter_lr: 0.00005
+  hla_adapter_lr: 0.0001
+  tcr_adapter_lr: 0.0001
+  phla_cross_attention_lr: 0.0001
+  ptcr_cross_attention_lr: 0.000075
+  phla_pooling_lr: 0.0001
+  ptcr_pooling_lr: 0.0001
+  phla_classifier_lr: 0.000075
+  ptcr_classifier_lr: 0.000075
+  phla_label_smoothing: 0.01
+  ptcr_label_smoothing: 0.015
+  phla_group_weighting: inverse_sqrt
+  ptcr_group_weighting: inverse_sqrt
+  group_weight_min: 0.5
+  group_weight_max: 2.0
+  task_step_ratio_enabled: false
 
 stage2:
   micro_batch_size: 8
@@ -41,13 +66,14 @@ stage2:
   stage2b_min_rounds: 5
   stage2b_max_rounds: 20
   early_stopping_patience: 5
-  early_stopping_min_delta: 0.0001
+  early_stopping_min_delta: 0.001
   peptide_unfrozen_layers: 2
   hla_unfrozen_layers: 2
   tcr_unfrozen_layers: 2
   peptide_top_lr: 0.00001
   peptide_lower_lr: 0.000005
   hla_top_lr: 0.00001
+  hla_lower_lr: 0.000005
   tcr_top_lr: 0.00001
   tcr_lower_lr: 0.000005
   adapter_lr: 0.00005

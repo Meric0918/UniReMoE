@@ -55,9 +55,9 @@ class Stage10TrainingConfig:
     pht_loss_weight: float = 1.0
     phla_loss_weight: float = 0.3
     ptcr_loss_weight: float = 0.2
-    pht_score_weight: float = 0.6
+    pht_score_weight: float = 0.4
     phla_score_weight: float = 0.2
-    ptcr_score_weight: float = 0.2
+    ptcr_score_weight: float = 0.4
     constraint_margin: float = 0.05
     hierarchy_lambda: float = 0.05
     pt_implication_lambda: float = 0.03

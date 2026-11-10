@@ -1,7 +1,7 @@
 paths:
   project_root: ..
-  data_root: ../data
-  cache_root: ../embedding_cache/plm_stage1
+  data_root: ../dataset
+  cache_root: ../embedding_cache/plm_stage1_ph_pt
   output_root: ../trained_model/PLM_Unified
   swanlog_root: ../swanlog
   esmc_model: /home/mjp/model/ESMC-300M
@@ -12,12 +12,12 @@ model:
   hla_input_dim: 960
   tcr_input_dim: 768
   adapter_hidden_dim: 256
-  model_dim: 128
-  num_attention_heads: 4
-  feedforward_dim: 512
-  adapter_dropout: 0.1
-  attention_dropout: 0.1
-  classifier_dropout: 0.2
+  model_dim: 256
+  num_attention_heads: 8
+  feedforward_dim: 1024
+  adapter_dropout: 0.15
+  attention_dropout: 0.15
+  classifier_dropout: 0.25
   peptide_min_length: 8
   peptide_max_length: 15
   hla_max_length: 34
@@ -28,8 +28,10 @@ cache:
   shard_size: 16384
   precompute_batch_size: 32
   compression: null
-  hla_splits: [train, val]
-  tcr_splits: [train, val, independent, triple, covid]
+  # The PH/PT train files are fold-independent. Validation uses the benchmark
+  # val splits below; no legacy data/data_* fold files are used.
+  hla_splits: [train, val_unseen_hla, val_unseen_pair, val_unseen_peptide]
+  tcr_splits: [train, val_unseen_pair, val_unseen_peptide, val_unseen_tcr]
 
 training:
   fold: 1
@@ -39,23 +41,65 @@ training:
   online_batch_size: 32
   num_workers: 2
   warmup_epochs_per_task: 2
-  max_rounds: 10
-  early_stopping_patience: 3
-  early_stopping_min_delta: 0.0001
+  max_rounds: 50
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.001
   adapter_lr: 0.0003
   cross_attention_lr: 0.0002
   pooling_lr: 0.0003
   classifier_lr: 0.0003
+  shared_peptide_adapter_lr: 0.00005
+  hla_adapter_lr: 0.0001
+  tcr_adapter_lr: 0.0001
+  phla_cross_attention_lr: 0.0001
+  ptcr_cross_attention_lr: 0.000075
+  phla_pooling_lr: 0.0001
+  ptcr_pooling_lr: 0.0001
+  phla_classifier_lr: 0.000075
+  ptcr_classifier_lr: 0.000075
   weight_decay: 0.01
+  no_decay_bias_and_norm: true
   scheduler_warmup_ratio: 0.05
+  scheduler_total_rounds: 40
+  scheduler_warmup_rounds: 1
+  scheduler_min_lr_ratio: 0.05
   gradient_clip_norm: 1.0
   fgm_epsilon: 1.0
+  phla_fgm_epsilon: 0.5
+  ptcr_fgm_epsilon: 0.5
+  phla_adversarial_loss_weight: 0.25
+  ptcr_adversarial_loss_weight: 0.25
+  adversarial_warmup_rounds: 2
+  phla_label_smoothing: 0.01
+  ptcr_label_smoothing: 0.015
+  phla_group_weighting: inverse_sqrt
+  ptcr_group_weighting: inverse_sqrt
+  group_weight_min: 0.5
+  group_weight_max: 2.0
+  phla_early_stopping_patience: 5
+  ptcr_early_stopping_patience: 5
+  round_early_stopping_patience: 5
+  task_step_ratio_enabled: false
+  phla_task_step_ratio: 1.0
+  ptcr_task_step_ratio: 1.0
+  retention_eval_enabled: true
+  retention_tolerance: 0.01
+  selection_calibration_guard_enabled: true
+  selection_nll_tolerance: 0.05
+  selection_ece_tolerance: 0.02
   threshold: 0.5
   mixed_precision: bf16
   log_every_steps: 50
   pin_memory: true
   persistent_workers: false
   device: auto
+  # Visualise each newly improved pHLA/pTCR task-best checkpoint. A fixed
+  # validation subset and task-specific reference reducer make rounds comparable.
+  best_umap_enabled: true
+  best_umap_max_samples_per_split: 1000
+  best_umap_random_state: 42
+  best_umap_n_neighbors: 30
+  best_umap_min_dist: 0.1
 
 swanlab:
   project: unifyimmun

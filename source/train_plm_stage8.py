@@ -4,9 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
+from collections.abc import Mapping
+from numbers import Real
 from pathlib import Path
+
+
+# Transformer Engine discovers NVRTC through CUDA_HOME.  The Stage-1/3
+# launchers already set this implicitly; Stage-8 must do the same when it is
+# started as an independent parallel branch.
+_CONDA_CUDA_HOME = Path(sys.executable).resolve().parent.parent / "cuda"
+if "CUDA_HOME" not in os.environ and _CONDA_CUDA_HOME.is_dir():
+    os.environ["CUDA_HOME"] = str(_CONDA_CUDA_HOME)
 
 from plm_unified.artifacts import create_artifact_timestamp
 from plm_unified.data import split_path
@@ -21,6 +32,7 @@ from plm_unified.stage8_checkpoint import (
 )
 from plm_unified.stage8_config import (
     Stage8Condition,
+    STAGE8_TRAINING_CONDITIONS,
     apply_stage8_overrides,
     load_stage8_config,
 )
@@ -43,7 +55,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--warmup-only", action="store_true")
-    modes.add_argument("--condition", choices=[value.value for value in Stage8Condition])
+    modes.add_argument(
+        "--condition",
+        choices=[value.value for value in STAGE8_TRAINING_CONDITIONS],
+    )
     modes.add_argument("--resume", type=Path)
     modes.add_argument("--all-ablations", action="store_true")
     parser.add_argument("--stage1-checkpoint", type=Path)
@@ -113,6 +128,96 @@ def _metrics(evaluation) -> dict:
     }
 
 
+def _add_numeric_metrics(payload: dict, prefix: str, values: Mapping) -> None:
+    for name, value in values.items():
+        if isinstance(value, Real):
+            payload[f"{prefix}/{name}"] = float(value)
+
+
+def _print_stage8_metrics(
+    *, phase: str, condition: str, progress_name: str, progress: int,
+    step: int, training: Mapping, evaluation=None,
+) -> None:
+    """Print one-line metrics so monitoring also works without SwanLab."""
+
+    prefix = (
+        f"[METRICS][STAGE8][{phase.upper()}][condition={condition}]"
+        f"[{progress_name}={progress}][step={step}]"
+    )
+
+    def emit(table: str, target: str, values: Mapping) -> None:
+        metrics = " ".join(
+            f"{name.upper()}={float(values[name]):.6g}"
+            for name in ("loss", "auroc", "aupr")
+            if isinstance(values.get(name), Real)
+        )
+        if metrics:
+            print(f"{prefix} {table}[{target}] {metrics}", flush=True)
+
+    for pass_name, values in training.items():
+        if not isinstance(values, Mapping):
+            continue
+        task_metrics = values.get("task_metrics")
+        if isinstance(task_metrics, Mapping):
+            for task, metrics in task_metrics.items():
+                if isinstance(metrics, Mapping):
+                    emit("TRAIN", f"{pass_name}/{task}", metrics)
+        elif isinstance(values.get("loss"), Real):
+            target = (
+                f"replay/{pass_name}"
+                if pass_name in {"phla", "ptcr"} else str(pass_name)
+            )
+            emit("TRAIN", target, values)
+    if evaluation is not None:
+        for task in ("pht", "phla", "ptcr"):
+            values = evaluation.metrics.get(task, {})
+            if isinstance(values, Mapping):
+                emit("VAL", f"val/{task}", values)
+
+
+def _log_stage8b_round(
+    *, trainer, training: Mapping, evaluation, improved: bool, tracker
+) -> None:
+    """Send one complete, condition-labelled Stage8B round record to SwanLab."""
+
+    payload = {
+        "stage8/phase": "stage8b",
+        "stage8/condition": trainer.condition.value,
+        "stage8/round": trainer.stage8b_round,
+        "stage8/global_step": trainer.global_step,
+        "stage8/improved": int(improved),
+        "stage8/best_joint_score": trainer.best_joint,
+        "stage8/bad_rounds": trainer.bad_rounds,
+        "stage8/validation_joint_score": evaluation.joint_score,
+        "stage8/validation/selected_pht_threshold": evaluation.selected_pht_threshold,
+    }
+    joint_training = training.get("joint", {})
+    if isinstance(joint_training, Mapping) and isinstance(
+        joint_training.get("total"), Real
+    ):
+        # Keep the original dashboard key while adding the structured metrics.
+        payload["stage8/joint_train_total"] = float(joint_training["total"])
+    for task, values in training.items():
+        if isinstance(values, Mapping):
+            _add_numeric_metrics(payload, f"stage8/train/{task}", values)
+            task_metrics = values.get("task_metrics")
+            if isinstance(task_metrics, Mapping):
+                for task_name, metrics in task_metrics.items():
+                    if isinstance(metrics, Mapping):
+                        _add_numeric_metrics(
+                            payload, f"stage8/train/{task}/{task_name}", metrics
+                        )
+    for task in ("pht", "phla", "ptcr"):
+        values = evaluation.metrics.get(task, {})
+        if isinstance(values, Mapping):
+            _add_numeric_metrics(payload, f"stage8/validation/{task}", values)
+    for group in ("violations", "constraint_components"):
+        values = evaluation.metrics.get(group, {})
+        if isinstance(values, Mapping):
+            _add_numeric_metrics(payload, f"stage8/validation/{group}", values)
+    tracker.log(payload, step=trainer.global_step)
+
+
 def _audit_and_loaders(config, *, run_timestamp: str, limit_per_type: int | None):
     audit = audit_stage8_class_dirs(
         config.data_dir(), config.stage8.class_dirs,
@@ -170,13 +275,24 @@ def _train_warmup(
         training = trainer.train_stage8a_epoch(epoch)
         evaluation = trainer.evaluate()
         pht_score = stage8_task_score(evaluation.metrics["pht"])
-        tracker.log({
+        payload = {
             "stage8/phase": "stage8a",
             "stage8/epoch": epoch,
             "stage8/train_total": training["total"],
             "stage8/validation_pht_score": pht_score,
             "stage8/validation_joint_score": evaluation.joint_score,
-        }, step=trainer.global_step)
+        }
+        task_metrics = training.get("task_metrics", {})
+        if isinstance(task_metrics, Mapping):
+            for task, metrics in task_metrics.items():
+                if isinstance(metrics, Mapping):
+                    _add_numeric_metrics(payload, f"stage8/train/joint/{task}", metrics)
+        tracker.log(payload, step=trainer.global_step)
+        _print_stage8_metrics(
+            phase="stage8a", condition=trainer.condition.value,
+            progress_name="epoch", progress=epoch, step=trainer.global_step,
+            training=training, evaluation=evaluation,
+        )
         if pht_score > best_pht_score:
             best_pht_score = pht_score
             best_path = save_stage8_warmup_checkpoint(
@@ -231,15 +347,18 @@ def _train_stage8b_rounds(
             run_timestamp=run_timestamp, metrics=_metrics(evaluation),
             best_checkpoint=best_path,
         )
-        tracker.log({
-            "stage8/phase": "stage8b",
-            "stage8/round": round_index,
-            "stage8/condition": trainer.condition.value,
-            "stage8/validation_joint_score": evaluation.joint_score,
-            "stage8/best_joint_score": trainer.best_joint,
-            "stage8/bad_rounds": trainer.bad_rounds,
-            "stage8/joint_train_total": training["joint"]["total"],
-        }, step=trainer.global_step)
+        _log_stage8b_round(
+            trainer=trainer,
+            training=training,
+            evaluation=evaluation,
+            improved=improved,
+            tracker=tracker,
+        )
+        _print_stage8_metrics(
+            phase="stage8b", condition=trainer.condition.value,
+            progress_name="round", progress=round_index,
+            step=trainer.global_step, training=training, evaluation=evaluation,
+        )
         if (
             round_index >= trainer.config.stage8.min_rounds
             and trainer.bad_rounds >= trainer.config.stage8.early_stopping_patience
@@ -257,6 +376,16 @@ def main() -> None:
     resume_value = (
         load_stage8_v2_checkpoint(args.resume, artifact_role="last")
         if args.resume else None
+    )
+    if (
+        resume_value is not None
+        and resume_value.get("condition")
+        not in {value.value for value in STAGE8_TRAINING_CONDITIONS}
+    ):
+        raise ValueError("Stage-8 can resume only baseline or full checkpoints")
+    resume_condition = (
+        Stage8Condition(resume_value["condition"])
+        if resume_value is not None else None
     )
     run_timestamp = (
         resume_value["run_timestamp"] if resume_value is not None
@@ -287,7 +416,9 @@ def main() -> None:
             fold=config.runtime.fold, seed=config.runtime.seed,
             expected_sha256=config.paths.stage1_sha256,
         )
-        with SwanLabTracker(config, run_timestamp=run_timestamp) as tracker:
+        with SwanLabTracker(
+            config, run_timestamp=run_timestamp, experiment_suffix="warmup"
+        ) as tracker:
             warmup_path = _train_warmup(
                 config=config, model=model, train_loaders=train_loaders,
                 val_loader=val_loader, source_stage1=source_stage1,
@@ -299,12 +430,14 @@ def main() -> None:
         return
 
     if resume_value is not None:
-        condition = Stage8Condition(resume_value["condition"])
+        condition = resume_condition
         source_stage1 = dict(resume_value["source_stage1"])
         warmup_checkpoint = Path(resume_value["source_stage8a"]["path"])
         output_dir = args.resume.expanduser().resolve().parent
         best_path = output_dir / f"stage8_best_{run_timestamp}.pt"
-        resume_id = resume_value.get("swanlab_run_id")
+        resume_id = resume_value.get("swanlab_run_id") or (
+            resume_value.get("training_state", {}) or {}
+        ).get("swanlab_run_id")
     else:
         condition = Stage8Condition(args.condition)
         warmup_checkpoint = args.warmup_checkpoint.expanduser().resolve()
@@ -320,7 +453,12 @@ def main() -> None:
         output_dir = config.run_dir(condition)
         resume_id = None
 
-    with SwanLabTracker(config, resume_id=resume_id, run_timestamp=run_timestamp) as tracker:
+    with SwanLabTracker(
+        config,
+        resume_id=resume_id,
+        run_timestamp=run_timestamp,
+        experiment_suffix=condition.value,
+    ) as tracker:
         trainer = Stage8OnlineTrainer(
             model, config, train_loaders, val_loader,
             condition=condition, tracker=tracker,

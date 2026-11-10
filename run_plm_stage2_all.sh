@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# One-click stage-2 training for every completed stage-1 fold/seed.
+# One-click stage-2 training for selected fold/seed runs, from Stage 1 or
+# from scratch.
 #
 # Optional environment overrides:
 #   STAGE2_PYTHON=/path/to/python
@@ -13,6 +14,7 @@ set -uo pipefail
 #   STAGE2_FOLDS=1,3,5             # Default: all available folds
 #   STAGE2_SEEDS=42,2026           # Default: all available seeds
 #   STAGE2_LIMIT=32                 # Debug only
+#   STAGE2_FROM_SCRATCH=1           # Do not load a Stage-1 checkpoint
 #   STAGE2_FORCE_RESTART=1          # Ignore an incomplete stage-2 checkpoint
 #   STAGE2_STOP_ON_ERROR=1          # Stop instead of continuing after a failure
 #   DRY_RUN=1                       # Print commands without training
@@ -33,6 +35,7 @@ NUM_WORKERS="${STAGE2_NUM_WORKERS:-2}"
 FOLDS_CSV="${STAGE2_FOLDS:-all}"
 SEEDS_CSV="${STAGE2_SEEDS:-all}"
 LIMIT="${STAGE2_LIMIT:-}"
+FROM_SCRATCH="${STAGE2_FROM_SCRATCH:-0}"
 FORCE_RESTART="${STAGE2_FORCE_RESTART:-0}"
 STOP_ON_ERROR="${STAGE2_STOP_ON_ERROR:-0}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -65,6 +68,7 @@ Options:
   --swanlab-mode MODE  online, local, offline, or disabled
   --num-workers N      DataLoader workers
   --limit N            Debug only: rows per split
+  --from-scratch       Start without loading a Stage-1 checkpoint
   --force-restart      Ignore an incomplete Stage-2 checkpoint
   --stop-on-error      Stop after the first failed run
   --dry-run            Print selected commands without training
@@ -127,6 +131,10 @@ while [[ $# -gt 0 ]]; do
             LIMIT="$2"
             shift 2
             ;;
+        --from-scratch)
+            FROM_SCRATCH=1
+            shift
+            ;;
         --force-restart)
             FORCE_RESTART=1
             shift
@@ -168,10 +176,18 @@ if [[ ! -f "${EXPORT_SCRIPT}" ]]; then
     exit 2
 fi
 if [[ ! -d "${MODEL_ROOT}" ]]; then
-    echo "[ERROR] Model root not found: ${MODEL_ROOT}" >&2
-    exit 2
+    if [[ "${FROM_SCRATCH}" == "1" \
+        && "${FOLDS_CSV}" != "all" \
+        && "${SEEDS_CSV}" != "all" ]]; then
+        if [[ "${DRY_RUN}" != "1" ]]; then
+            mkdir -p "${MODEL_ROOT}"
+        fi
+    else
+        echo "[ERROR] Model root not found: ${MODEL_ROOT}" >&2
+        exit 2
+    fi
 fi
-for flag_name in FORCE_RESTART STOP_ON_ERROR DRY_RUN; do
+for flag_name in FROM_SCRATCH FORCE_RESTART STOP_ON_ERROR DRY_RUN; do
     flag_value="${!flag_name}"
     if [[ "${flag_value}" != "0" && "${flag_value}" != "1" ]]; then
         echo "[ERROR] ${flag_name} must be 0 or 1, got: ${flag_value}" >&2
@@ -232,43 +248,103 @@ SEED_FILTER=()
 parse_id_filter "${FOLDS_CSV}" "fold" FOLD_FILTER
 parse_id_filter "${SEEDS_CSV}" "seed" SEED_FILTER
 
-mapfile -t ALL_STAGE1_CHECKPOINTS < <(
-    find "${MODEL_ROOT}" \
-        -mindepth 3 \
-        -maxdepth 3 \
-        -type f \
-        -name "last.pt" \
-        -path "*/fold_*/seed_*/last.pt" \
-        | sort
-)
+SELECTED_RUN_DIRS=()
+SELECTED_STAGE1_CHECKPOINTS=()
 
-if [[ ${#ALL_STAGE1_CHECKPOINTS[@]} -eq 0 ]]; then
-    echo "[ERROR] No fold_*/seed_*/last.pt checkpoints found in ${MODEL_ROOT}" >&2
+if [[ "${FROM_SCRATCH}" == "1" ]]; then
+    # Scratch runs only need the fold/seed directory as an output location;
+    # they deliberately do not require a Stage-1 last.pt file.
+    ALL_RUN_DIRS=()
+    if [[ -d "${MODEL_ROOT}" ]]; then
+        mapfile -t ALL_RUN_DIRS < <(
+            find "${MODEL_ROOT}" \
+                -mindepth 2 \
+                -maxdepth 2 \
+                -type d \
+                -path "*/fold_*/seed_*" \
+                | sort
+        )
+    fi
+    for candidate_run_dir in "${ALL_RUN_DIRS[@]}"; do
+        candidate_seed_dir="$(basename "${candidate_run_dir}")"
+        candidate_fold_dir="$(basename "$(dirname "${candidate_run_dir}")")"
+        if [[ ! "${candidate_fold_dir}" =~ ^fold_([0-9]+)$ ]]; then
+            continue
+        fi
+        candidate_fold="${BASH_REMATCH[1]}"
+        if [[ ! "${candidate_seed_dir}" =~ ^seed_([0-9]+)$ ]]; then
+            continue
+        fi
+        candidate_seed="${BASH_REMATCH[1]}"
+        if matches_filter "${candidate_fold}" "${FOLD_FILTER[@]}" \
+            && matches_filter "${candidate_seed}" "${SEED_FILTER[@]}"; then
+            SELECTED_RUN_DIRS+=("${candidate_run_dir}")
+            SELECTED_STAGE1_CHECKPOINTS+=("")
+        fi
+    done
+
+    # Allow a new scratch run to be launched when explicit fold/seed IDs have
+    # no directory yet.  The training entry point creates the output folder.
+    if [[ ${#SELECTED_RUN_DIRS[@]} -eq 0 \
+        && "${FOLDS_CSV}" != "all" \
+        && "${SEEDS_CSV}" != "all" ]]; then
+        for fold in "${FOLD_FILTER[@]}"; do
+            for seed in "${SEED_FILTER[@]}"; do
+                SELECTED_RUN_DIRS+=("${MODEL_ROOT}/fold_${fold}/seed_${seed}")
+                SELECTED_STAGE1_CHECKPOINTS+=("")
+            done
+        done
+    fi
+else
+    mapfile -t ALL_STAGE1_CHECKPOINTS < <(
+        find "${MODEL_ROOT}" \
+            -mindepth 3 \
+            -maxdepth 3 \
+            -type f \
+            -name "last.pt" \
+            -path "*/fold_*/seed_*/last.pt" \
+            | sort
+    )
+
+    if [[ ${#ALL_STAGE1_CHECKPOINTS[@]} -eq 0 ]]; then
+        echo "[ERROR] No fold_*/seed_*/last.pt checkpoints found in ${MODEL_ROOT}" >&2
+        exit 2
+    fi
+
+    for checkpoint in "${ALL_STAGE1_CHECKPOINTS[@]}"; do
+        candidate_run_dir="$(dirname "${checkpoint}")"
+        candidate_seed_dir="$(basename "${candidate_run_dir}")"
+        candidate_fold_dir="$(basename "$(dirname "${candidate_run_dir}")")"
+        if [[ ! "${candidate_fold_dir}" =~ ^fold_([0-9]+)$ ]]; then
+            continue
+        fi
+        candidate_fold="${BASH_REMATCH[1]}"
+        if [[ ! "${candidate_seed_dir}" =~ ^seed_([0-9]+)$ ]]; then
+            continue
+        fi
+        candidate_seed="${BASH_REMATCH[1]}"
+        if matches_filter "${candidate_fold}" "${FOLD_FILTER[@]}" \
+            && matches_filter "${candidate_seed}" "${SEED_FILTER[@]}"; then
+            SELECTED_RUN_DIRS+=("${candidate_run_dir}")
+            SELECTED_STAGE1_CHECKPOINTS+=("${checkpoint}")
+        fi
+    done
+fi
+
+if [[ ${#SELECTED_RUN_DIRS[@]} -eq 0 ]]; then
+    if [[ "${FROM_SCRATCH}" == "1" ]]; then
+        echo "[ERROR] No fold_*/seed_* output directories found for scratch runs; " \
+            "specify both --folds and --seeds" >&2
+    else
+        echo "[ERROR] No Stage-1 checkpoints match folds=${FOLDS_CSV} seeds=${SEEDS_CSV}" >&2
+    fi
     exit 2
 fi
 
-STAGE1_CHECKPOINTS=()
-for checkpoint in "${ALL_STAGE1_CHECKPOINTS[@]}"; do
-    candidate_run_dir="$(dirname "${checkpoint}")"
-    candidate_seed_dir="$(basename "${candidate_run_dir}")"
-    candidate_fold_dir="$(basename "$(dirname "${candidate_run_dir}")")"
-    if [[ ! "${candidate_fold_dir}" =~ ^fold_([0-9]+)$ ]]; then
-        continue
-    fi
-    candidate_fold="${BASH_REMATCH[1]}"
-    if [[ ! "${candidate_seed_dir}" =~ ^seed_([0-9]+)$ ]]; then
-        continue
-    fi
-    candidate_seed="${BASH_REMATCH[1]}"
-    if matches_filter "${candidate_fold}" "${FOLD_FILTER[@]}" \
-        && matches_filter "${candidate_seed}" "${SEED_FILTER[@]}"; then
-        STAGE1_CHECKPOINTS+=("${checkpoint}")
-    fi
-done
-
-if [[ ${#STAGE1_CHECKPOINTS[@]} -eq 0 ]]; then
-    echo "[ERROR] No Stage-1 checkpoints match folds=${FOLDS_CSV} seeds=${SEEDS_CSV}" >&2
-    exit 2
+if [[ "${FROM_SCRATCH}" == "1" ]]; then
+    STAGE2_MODE_LABEL="from scratch"
+else
+    STAGE2_MODE_LABEL="from Stage-1 checkpoints"
 fi
 
 if [[ "${DRY_RUN}" != "1" ]]; then
@@ -276,7 +352,7 @@ if [[ "${DRY_RUN}" != "1" ]]; then
 fi
 
 echo "============================================================"
-echo " Unified PLM Stage 2: all completed Stage-1 runs"
+echo " Unified PLM Stage 2: ${STAGE2_MODE_LABEL}"
 echo "============================================================"
 echo "Project root : ${PROJECT_ROOT}"
 echo "Config       : ${CONFIG}"
@@ -287,7 +363,8 @@ echo "SwanLab mode : ${SWANLAB_MODE}"
 echo "Workers      : ${NUM_WORKERS}"
 echo "Fold filter  : ${FOLDS_CSV}"
 echo "Seed filter  : ${SEEDS_CSV}"
-echo "Runs selected: ${#STAGE1_CHECKPOINTS[@]}"
+echo "Initialization: ${STAGE2_MODE_LABEL}"
+echo "Runs selected: ${#SELECTED_RUN_DIRS[@]}"
 echo "Auto resume  : $([[ "${FORCE_RESTART}" == "1" ]] && echo no || echo yes)"
 echo "Dry run      : ${DRY_RUN}"
 echo "============================================================"
@@ -319,8 +396,9 @@ print(checkpoint.get("stage", "unknown"))
 PY
 }
 
-for stage1_checkpoint in "${STAGE1_CHECKPOINTS[@]}"; do
-    run_dir="$(dirname "${stage1_checkpoint}")"
+for run_index in "${!SELECTED_RUN_DIRS[@]}"; do
+    run_dir="${SELECTED_RUN_DIRS[run_index]}"
+    stage1_checkpoint="${SELECTED_STAGE1_CHECKPOINTS[run_index]}"
     seed_dir="$(basename "${run_dir}")"
     fold_dir="$(basename "$(dirname "${run_dir}")")"
 
@@ -419,8 +497,13 @@ for stage1_checkpoint in "${STAGE1_CHECKPOINTS[@]}"; do
         echo "[RESUME] ${run_label}: ${latest_stage2} (stage=${stage})"
         command+=("--resume" "${latest_stage2}")
     else
-        echo "[START] ${run_label}: ${stage1_checkpoint}"
-        command+=("--stage1-checkpoint" "${stage1_checkpoint}")
+        if [[ "${FROM_SCRATCH}" == "1" ]]; then
+            echo "[START] ${run_label}: from scratch"
+            command+=("--from-scratch")
+        else
+            echo "[START] ${run_label}: ${stage1_checkpoint}"
+            command+=("--stage1-checkpoint" "${stage1_checkpoint}")
+        fi
     fi
 
     if [[ -n "${LIMIT}" ]]; then

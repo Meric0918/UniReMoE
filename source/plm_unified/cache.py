@@ -49,6 +49,7 @@ class EmbeddingCacheWriter:
         model_metadata: Mapping[str, Any],
         dtype: str = "float16",
         shard_size: int = 4096,
+        chunk_rows: int = 64,
         compression: str | None = None,
         overwrite: bool = False,
     ):
@@ -56,6 +57,8 @@ class EmbeddingCacheWriter:
             raise ValueError("The HDF5 cache currently supports dtype='float16' only")
         if shard_size < 1:
             raise ValueError("shard_size must be positive")
+        if chunk_rows < 1:
+            raise ValueError("chunk_rows must be positive")
         self.h5py = _require_h5py()
         self.entity = entity
         self.entity_dir = Path(root).resolve() / entity
@@ -71,6 +74,7 @@ class EmbeddingCacheWriter:
         self.max_length = max_length
         self.dtype = dtype
         self.shard_size = shard_size
+        self.chunk_rows = chunk_rows
         self.compression = compression
         self.model_metadata = dict(model_metadata)
 
@@ -112,7 +116,7 @@ class EmbeddingCacheWriter:
         self.shard_count = 0
         shard_path = self.shards_dir / f"part-{self.shard_id:05d}.h5"
         self.handle = self.h5py.File(shard_path, "w")
-        chunk_rows = min(64, self.shard_size)
+        chunk_rows = min(self.chunk_rows, self.shard_size)
         string_type = self.h5py.string_dtype(encoding="utf-8")
         self.datasets = {
             "sequences": self.handle.create_dataset(
@@ -235,6 +239,7 @@ class EmbeddingCacheWriter:
             "max_length": self.max_length,
             "dtype": self.dtype,
             "shard_size": self.shard_size,
+            "chunk_rows": self.chunk_rows,
             "compression": self.compression,
             "model": self.model_metadata,
             "shards": self.shard_summaries,

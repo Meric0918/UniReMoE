@@ -1,5 +1,5 @@
-"""Unified PLM training pipeline for peptide-HLA and peptide-TCR prediction."""
+"""Unified PLM pipelines for binary and ternary immune recognition."""
 
-from .config import ExperimentConfig, load_config
+from .config import ExperimentConfig, Stage5Config, TripletConfig, load_config
 
-__all__ = ["ExperimentConfig", "load_config"]
+__all__ = ["ExperimentConfig", "Stage5Config", "TripletConfig", "load_config"]

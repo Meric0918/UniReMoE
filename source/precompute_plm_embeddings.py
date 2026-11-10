@@ -18,37 +18,48 @@ from plm_unified.encoders import ESMCResidueEncoder, TCRBertResidueEncoder
 from plm_unified.trainer import resolve_device
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None, *, default_config="plm_stage1.yaml", entities=("peptide", "hla", "tcr")) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
         default=str(
-            Path(__file__).resolve().parents[1] / "configs" / "plm_stage1.yaml"
+            Path(__file__).resolve().parents[1] / "configs" / default_config
         ),
     )
     parser.add_argument("--fold", type=int)
     parser.add_argument(
         "--entities",
         nargs="+",
-        choices=("peptide", "hla", "tcr"),
-        default=("peptide", "hla", "tcr"),
+        choices=entities,
+        default=entities,
     )
     parser.add_argument("--device", help="Examples: cuda, cuda:1, cpu")
+    parser.add_argument("--cache-root", type=Path)
     parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Replace the selected entity caches if they already exist.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv=None, *, default_config="plm_stage1.yaml", config_loader=load_config,
+         entities=("peptide", "hla", "tcr"), default_cache_name=None,
+         protect_config_cache=False) -> None:
+    args = parse_args(argv, default_config=default_config, entities=entities)
     config = apply_overrides(
-        load_config(args.config),
+        config_loader(args.config),
         fold=args.fold,
         device=args.device,
     )
+    if args.cache_root is not None or default_cache_name is not None:
+        cache_root = (
+            args.cache_root.expanduser().resolve() if args.cache_root is not None
+            else config.paths.project_root / "embedding_cache" / default_cache_name
+        )
+        if protect_config_cache and cache_root == config.paths.cache_root:
+            raise ValueError("PH precomputation must use a separate cache root from the configured training cache")
+        config.paths.cache_root = cache_root
     config.validate(require_models=True)
     device = resolve_device(config.training.device)
     artifact_timestamp = create_artifact_timestamp()
@@ -68,7 +79,7 @@ def main() -> None:
             f"{split_name}: kept={values['kept']:,}, "
             f"dropped_out_of_range={dropped:,}"
         )
-    for entity in ("peptide", "hla", "tcr"):
+    for entity in entities:
         print(f"{entity}: {len(sequences[entity]):,} unique sequences")
     filter_stats_path = cache_dir / timestamped_filename(
         "filter_stats.json", artifact_timestamp

@@ -10,8 +10,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .metrics import compute_binary_metrics, task_score
-from .stage8_evaluation import stage8_joint_score
+from .metrics import compute_binary_metrics
+from .stage8_evaluation import stage8_joint_score, stage8_task_score
 from .triplet_evaluation import select_mcc_threshold
 
 
@@ -42,8 +42,8 @@ def retention_is_eligible(
         raise ValueError("retention degradation tolerance cannot be negative")
     epsilon = 1e-12
     return all(
-        task_score(student_metrics[task])
-        >= task_score(teacher_metrics[task]) - tolerance - epsilon
+        stage8_task_score(student_metrics[task])
+        >= stage8_task_score(teacher_metrics[task]) - tolerance - epsilon
         for task in ("phla", "ptcr")
     )
 
@@ -157,7 +157,7 @@ def evaluate_stage10_models(
     device: torch.device,
     mixed_precision: str,
     margin: float = 0.05,
-    selection_weights: tuple[float, float, float] = (0.6, 0.2, 0.2),
+    selection_weights: tuple[float, float, float] = (0.4, 0.2, 0.4),
     degradation_tolerance: float = 0.002,
 ) -> Stage10Evaluation:
     teacher.eval()
@@ -330,8 +330,8 @@ def evaluate_stage10_models(
     retention.update(
         {
             f"{task}_task_score_delta": (
-                task_score(student_metrics[task])
-                - task_score(teacher_metrics[task])
+                stage8_task_score(student_metrics[task])
+                - stage8_task_score(teacher_metrics[task])
             )
             for task in ("phla", "ptcr")
         }

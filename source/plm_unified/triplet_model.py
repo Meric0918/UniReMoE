@@ -429,6 +429,55 @@ def _stage1_checkpoint_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _transfer_adapter_projection_to_sequence_encoders(
+    state: Mapping[str, torch.Tensor],
+    binding_model: TripletBindingModel,
+) -> tuple[dict[str, torch.Tensor], tuple[str, ...]]:
+    """Map the shape-compatible parts of Stage-1 adapters to sequence encoders."""
+
+    transferred = dict(state)
+    entities: list[str] = []
+    parameter_map = (
+        ("network.0.weight", "projection.0.weight"),
+        ("network.0.bias", "projection.0.bias"),
+        ("network.4.weight", "projection.1.weight"),
+        ("network.4.bias", "projection.1.bias"),
+    )
+    for entity in ("peptide", "hla", "tcr"):
+        encoder = getattr(binding_model, f"{entity}_encoder", None)
+        if (
+            encoder is None
+            or not hasattr(encoder, "projection")
+            or not hasattr(encoder, "layers")
+        ):
+            continue
+        adapter_prefix = f"{entity}_adapter."
+        adapter_keys = [
+            key for key in transferred if key.startswith(adapter_prefix)
+        ]
+        if not adapter_keys:
+            continue
+        for old_suffix, new_suffix in parameter_map:
+            old_key = f"{adapter_prefix}{old_suffix}"
+            new_key = f"{entity}_encoder.{new_suffix}"
+            if old_key not in transferred:
+                raise ValueError(
+                    f"Stage-1 {entity} adapter is missing transferable "
+                    f"parameter {old_key}"
+                )
+            target = encoder.state_dict().get(new_suffix)
+            if target is None or target.shape != transferred[old_key].shape:
+                raise ValueError(
+                    f"Stage-1 {entity} adapter parameter {old_key} does not match "
+                    f"the Stage-8 sequence encoder shape at {new_key}"
+                )
+            transferred[new_key] = transferred[old_key]
+        for key in adapter_keys:
+            del transferred[key]
+        entities.append(entity)
+    return transferred, tuple(entities)
+
+
 def initialise_binding_from_stage1(
     binding_model: TripletBindingModel,
     checkpoint_path: str | Path,
@@ -439,6 +488,7 @@ def initialise_binding_from_stage1(
     encoder_metadata: Mapping[str, Mapping[str, Any]],
     expected_sha256: str | None = None,
     require_joint_checkpoint: bool = False,
+    transfer_sequence_encoder_projections: bool = False,
 ) -> dict[str, Any]:
     """Load a compatible Stage-1 source into a triplet-capable binding model."""
 
@@ -460,14 +510,14 @@ def initialise_binding_from_stage1(
         and checkpoint.get("stage") == "complete"
     )
     is_stage1_joint = (
-        format_version == 3
+        format_version in {3, 4}
         and checkpoint_type == "stage1_joint_model"
         and checkpoint.get("stage") == "stage1b"
         and checkpoint.get("model_scope") == "joint_heads"
     )
     if require_joint_checkpoint and not is_stage1_joint:
         raise ValueError(
-            "Stage-8 requires format_version=3 Stage-1 best_joint metadata"
+            "Stage-8 requires format_version=3 or 4 Stage-1 best_joint metadata"
         )
     if not is_completed_stage1 and not is_stage1_joint:
         if format_version not in {1, 2, 3}:
@@ -475,7 +525,8 @@ def initialise_binding_from_stage1(
         if checkpoint_type == "stage1_joint_model":
             raise ValueError(
                 "Unsupported Stage-1 joint checkpoint format: expected "
-                "format_version=3, stage='stage1b', model_scope='joint_heads'"
+                "format_version=3 or 4, stage='stage1b', "
+                "model_scope='joint_heads'"
             )
         if checkpoint_type is not None:
             raise ValueError(
@@ -488,7 +539,22 @@ def initialise_binding_from_stage1(
         )
 
     checkpoint_config = checkpoint.get("config", {})
-    if checkpoint_config.get("model") != asdict(model_config):
+    source_model_config = checkpoint_config.get("model")
+    expected_model_config = asdict(model_config)
+    if (
+        transfer_sequence_encoder_projections
+        and isinstance(source_model_config, Mapping)
+    ):
+        # adapter_dropout has no role in the new sequence-encoder architecture.
+        source_model_config = {
+            key: value for key, value in source_model_config.items()
+            if key != "adapter_dropout"
+        }
+        expected_model_config = {
+            key: value for key, value in expected_model_config.items()
+            if key != "adapter_dropout"
+        }
+    if source_model_config != expected_model_config:
         raise ValueError("Stage-1 checkpoint model configuration does not match")
     source_training = checkpoint_config.get("training", {})
     for key, expected in (("fold", fold), ("seed", seed)):
@@ -523,6 +589,11 @@ def initialise_binding_from_stage1(
     state = checkpoint.get("model")
     if not isinstance(state, Mapping):
         raise ValueError("Stage-1 checkpoint does not contain the unified model")
+    transferred_entities: tuple[str, ...] = ()
+    if transfer_sequence_encoder_projections:
+        state, transferred_entities = _transfer_adapter_projection_to_sequence_encoders(
+            state, binding_model
+        )
     missing, unexpected = binding_model.load_state_dict(
         state,
         strict=False,
@@ -535,13 +606,20 @@ def initialise_binding_from_stage1(
         "triplet_cross_attention.",
         "triplet_pooling.",
         "triplet_classifier.",
+    ) + tuple(
+        prefix
+        for entity in transferred_entities
+        for prefix in (
+            f"{entity}_encoder.layers.",
+            f"{entity}_encoder.final_norm.",
+        )
     )
     disallowed_missing = [
         key for key in missing if not key.startswith(allowed_prefixes)
     ]
     if disallowed_missing or unexpected:
         raise RuntimeError(
-            "Stage-1 to Stage-3 state mismatch: "
+            "Stage-1 to downstream-model state mismatch: "
             f"missing={disallowed_missing}, unexpected={unexpected}"
         )
 
@@ -564,6 +642,16 @@ def initialise_binding_from_stage1(
         "source_seed": source_training.get("seed"),
         "source_fold": source_training.get("fold"),
         "encoder_fingerprints": encoder_fingerprints,
+        "sequence_encoder_initialization": (
+            {
+                "kind": "stage1_adapter_projection_transfer",
+                "transferred_entities": list(transferred_entities),
+                "new_self_attention_layers": "random_initialization",
+                "new_final_norms": "random_initialization",
+            }
+            if transferred_entities
+            else None
+        ),
     }
 
 

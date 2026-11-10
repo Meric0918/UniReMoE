@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -uo pipefail
+cd /home/mjp/Project/PLM/UnifyImmun
+export PYTHON_BIN=/home/mjp/miniconda3/envs/unifyimmun/bin/python
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+export OPENBLAS_NUM_THREADS=4
+export NUMEXPR_NUM_THREADS=4
+export CUDA_VISIBLE_DEVICES=0
+/home/mjp/Project/PLM/UnifyImmun/run_stage_final.sh train-sequential --config /home/mjp/Project/PLM/UnifyImmun/training_logs/stage_final_20261110_160519/config.yaml --output-dir /home/mjp/Project/PLM/UnifyImmun/trained_model/PLM_Stage_final/seed_42/sequential_20261110_160519 --device cuda --swanlab-mode online 2>&1 | tee /home/mjp/Project/PLM/UnifyImmun/training_logs/stage_final_20261110_160519/sequential.log
+status=${PIPESTATUS[0]}
+printf "%s\n" "$status" > /home/mjp/Project/PLM/UnifyImmun/training_logs/stage_final_20261110_160519/sequential.exit_code
+exit "$status"

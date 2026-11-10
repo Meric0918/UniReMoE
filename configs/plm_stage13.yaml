@@ -1,0 +1,78 @@
+paths:
+  project_root: ..
+  data_root: ../dataset
+  residue_cache_root: ../embedding_cache/plm_stage1_ph_pt
+  test_residue_cache_root: ../embedding_cache/plm_stage1_ph_pt_benchmark_test
+  graph_root: ../embedding_cache/plm_stage13
+  output_root: ../trained_model/PLM_Stage13
+  swanlog_root: ../swanlog/PLM_Stage13
+  esmc_model: /home/mjp/model/ESMC-300M
+  tcr_bert_model: /home/mjp/model/TCR-Bert
+
+model:
+  peptide_input_dim: 960
+  hla_input_dim: 960
+  tcr_input_dim: 768
+  adapter_hidden_dim: 256
+  model_dim: 256
+  num_attention_heads: 8
+  feedforward_dim: 1024
+  adapter_dropout: 0.1
+  attention_dropout: 0.1
+  classifier_dropout: 0.2
+  peptide_min_length: 8
+  peptide_max_length: 15
+  hla_max_length: 34
+  tcr_max_length: 34
+
+data:
+  ph_train: PH/train.csv
+  pt_train: PT/train.csv
+  ph_validation_splits: [val_unseen_hla, val_unseen_pair, val_unseen_peptide]
+  pt_validation_splits: [val_unseen_pair, val_unseen_peptide, val_unseen_tcr]
+  ph_test_splits: [test_unseen_hla, test_unseen_pair, test_unseen_peptide]
+  pt_test_splits: [test_unseen_pair, test_unseen_peptide, test_unseen_tcr]
+
+graph:
+  hidden_dim: 256
+  num_layers: 2
+  fanouts: [16, 8]
+  dropout: 0.1
+  projection_dropout: 0.1
+  build_batch_size: 512
+  sampling_seed: 20260901
+
+runtime:
+  fold: 1
+  seed: 42
+  device: auto
+  num_workers: 2
+  pin_memory: true
+
+training:
+  batch_size: 1024
+  warmup_epochs_per_task: 2
+  max_rounds: 10
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.001
+  graph_lr: 0.0003
+  fusion_lr: 0.0003
+  adapter_lr: 0.0003
+  cross_attention_lr: 0.0002
+  pooling_lr: 0.0003
+  classifier_lr: 0.0003
+  weight_decay: 0.01
+  scheduler_warmup_ratio: 0.05
+  gradient_clip_norm: 1.0
+  fgm_epsilon: 1.0
+  threshold: 0.5
+  mixed_precision: bf16
+  log_every_steps: 50
+
+swanlab:
+  project: unifyimmun
+  workspace: null
+  mode: disabled
+  group: plm-stage13-fold{fold}
+  experiment_prefix: PLM-Stage13-GraphSAGE
+  tags: [ESMC-300M, TCR-BERT, GraphSAGE, stage13, PH, PT]

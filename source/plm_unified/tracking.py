@@ -15,6 +15,7 @@ class SwanLabTracker:
         *,
         resume_id: Optional[str] = None,
         run_timestamp: Optional[str] = None,
+        experiment_suffix: Optional[str] = None,
     ):
         self.mode = config.swanlab.mode
         self.run = None
@@ -36,13 +37,80 @@ class SwanLabTracker:
 
         logdir = config.paths.swanlog_root
         logdir.mkdir(parents=True, exist_ok=True)
-        group = config.swanlab.group.format(fold=config.training.fold)
+        fold = getattr(config.training, "fold", None)
+        seed = getattr(config.training, "seed", None)
+        runtime = getattr(config, "runtime", None)
+        if runtime is not None:
+            fold = getattr(runtime, "fold", fold)
+            seed = getattr(runtime, "seed", seed)
+        if fold is None or seed is None:
+            raise ValueError("SwanLab-compatible config must expose fold and seed")
+        group = config.swanlab.group.format(fold=fold)
         experiment_name = (
             f"{config.swanlab.experiment_prefix}"
-            f"-fold{config.training.fold}-seed{config.training.seed}"
+            f"-fold{fold}-seed{seed}"
             f"-{self.run_timestamp}"
         )
-        if "stage2" in config.swanlab.experiment_prefix.lower():
+        if experiment_suffix:
+            experiment_name = f"{experiment_name}-{experiment_suffix}"
+        experiment_prefix = config.swanlab.experiment_prefix.lower()
+        if "stage-adapter" in experiment_prefix or "stage_adapter" in experiment_prefix:
+            initialization = getattr(getattr(config, "stage_adapter", None), "initialization", "checkpoint")
+            if initialization == "random":
+                description = "Stage Adapter PHT training from random PLMs and binding modules, with the full PHT path trainable."
+            elif initialization == "random_binding":
+                description = "Stage Adapter PHT training from random shared adapters and PHT modules with frozen pretrained PLMs."
+            else:
+                description = (
+                    "Stage Adapter PHT-only training with frozen PLM encoders and "
+                    "pHLA/pTCR experts, and trainable PHT-specific modules."
+                )
+        elif "stage11" in experiment_prefix:
+            description = (
+                "Stage11 frozen ESM-C/TCR-BERT PHT training with alternating "
+                "multi-positive peptide/HLA and PH/TCR contrastive passes."
+            )
+        elif "stage15" in experiment_prefix:
+            description = (
+                "Stage-15 from-scratch downstream PH/PT training on frozen PLM "
+                "caches with one Shared Hyper-PMT fusion encoder."
+            )
+        elif "stage12" in experiment_prefix:
+            description = (
+                "Stage-12 Stage-1-initialised online-PLM retraining with "
+                "PT-focused replay and validation-gated PH/PHT retention."
+            )
+        elif "stage14" in experiment_prefix:
+            description = (
+                "Stage-14 Stage-1-initialised Hyper-PMT heterogeneous hypergraph "
+                "fusion with shared PH/PT/PHT interaction and gated PH prior."
+            )
+        elif "stage8" in experiment_prefix:
+            description = (
+                "Stage-8 Stage-1-initialised, online-PLM four-type training with "
+                "directed hierarchy and pTCR implication constraints."
+            )
+        elif "stage5" in experiment_prefix:
+            description = (
+                "Stage-5 random-downstream, frozen-PLM pHLA/pTCR/PHT joint "
+                "training with independently normalized task losses."
+            )
+        elif "triplet" in experiment_prefix or "stage3" in experiment_prefix:
+            description = (
+                "Stage-3 HLA-peptide-TCR sequential cross-attention "
+                "fine-tuning with bounded pHLA/pTCR replay."
+            )
+        elif "stage-pht" in experiment_prefix or "stage_pht" in experiment_prefix:
+            description = (
+                "Stage PHT training with frozen pretrained ESM-C/TCR-BERT, three "
+                "random sequence encoders and sequential PH/TCR cross-attention."
+            )
+        elif "stage1-encoder" in experiment_prefix or "stage1_encoder" in experiment_prefix:
+            description = (
+                "Stage1 training on frozen PLM residue features with shared Peptide "
+                "and independent HLA/TCR self-attention encoders and module-targeted FGM."
+            )
+        elif "stage2" in experiment_prefix:
             description = (
                 "Unified ESM-C/TCR-BERT progressive stage-2 fine-tuning with "
                 "alternating pHLA/pTCR training and task-specific checkpoints."

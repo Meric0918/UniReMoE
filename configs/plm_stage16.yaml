@@ -1,0 +1,46 @@
+# Stage 16: the scientific contract is embedded in every checkpoint.
+stage: 16
+condition: full
+paths:
+  project_root: ..
+  data_root: ../dataset
+  output_root: ../trained_model/PLM_Stage16
+  cache_root: ../embedding_cache/stage16_18_teacher
+  esmc_model: /home/mjp/model/ESMC-300M
+  tcr_bert_model: /home/mjp/model/TCR-Bert
+  stage1_checkpoint: ../trained_model/PLM_Unified_PH_PT/fold_1/seed_42/best_round/best_joint_20260920_151134_400917.pt
+  stage1_sha256: ea95033e9e228a9e8b514ee802bd27d1911b02b22447157473fcb477b9722d59
+  warmup_checkpoint: ../trained_model/PLM_Stage8/fold_1/seed_42/warmup/stage8a_best_pht_20260921_111731_349210.pt
+  warmup_sha256: 404d7aad11d17bb15480fea15380b290b7d8249b6c008f649b202fe5dc35d3a9
+  teacher_checkpoint: ../trained_model/PLM_Unified_PH_PT/fold_1/seed_42/best_ptcr_20260920_151134_400917.pt
+  teacher_sha256: aac5a63d0de2789c21f11505915b635dfc687108d2c3e77fb26bb3c5abc5ea91
+  swanlog_root: ../swanlog/PLM_Stage16
+runtime:
+  fold: 1
+  seed: 42
+  device: cuda
+  num_workers: 0
+training:
+  rounds: 35
+  scheduler_rounds: 100
+  micro_batch_size: 4
+  gradient_accumulation_steps: 16
+  eval_batch_size: 32
+  mixed_precision: bf16
+  sampler_policy: controlled_v1
+  checkpoint_every_steps: 250
+  log_every_steps: 50
+  gradient_diagnostics: true
+selection:
+  macro_tolerance: 0.01
+  split_tolerance: 0.02
+  pht_tolerance: 0.02
+  min_delta: 0.0001
+policy_overrides: {}
+swanlab:
+  project: unifyimmun
+  workspace: null
+  mode: online
+  group: plm-stage16-fold{fold}
+  experiment_prefix: PLM-Stage16
+  tags: [ESMC-300M, TCR-BERT, stage16, independent-pt-selection, controlled-v1]

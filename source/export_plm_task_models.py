@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Split unified Stage-1 checkpoints into deployable pHLA and pTCR models."""
+"""Split Stage1 adapter or encoder checkpoints into deployable task models."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         nargs="+",
         required=True,
-        help="One or more trusted legacy full checkpoints, such as best_joint.pt.",
+        help="One or more trusted full Stage1 adapter or encoder checkpoints, such as best_joint.pt.",
     )
     parser.add_argument(
         "--output-dir",

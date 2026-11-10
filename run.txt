@@ -11,3 +11,30 @@ python source/test_ptcr_best.py \
     --seeds 42 2026 \
     --sets covid independent triple \
     --device cuda
+
+向量可视化：
+/home/mjp/miniconda3/envs/unifyimmun/bin/python \
+    source/visualize_plm_embeddings.py \
+    --config configs/plm_stage2.yaml \
+    --stage2-checkpoint \
+      trained_model/PLM_Unified/fold_1/seed_42/stage2b_best_joint_20260726_235238_711877.pt \
+    --split val \
+    --tasks phla,ptcr \
+    --reducers pca,umap \
+    --entity-feature-space adapter \
+    --max-pairs-per-task 20000 \
+    --max-entity-sequences 20000 \
+    --metric-sample-size 5000 \
+    --random-state 42 \
+    --device cuda \
+    --output-dir analysis_results/plm_embeddings/fold_1_seed_42
+
+python source/train_plm_triplet.py \
+    --config configs/plm_triplet.yaml \
+    --stage1-checkpoint \
+      trained_model/PLM_Unified/fold_4/seed_2026/last.pt \
+    --fold 4 \
+    --seed 2026 \
+    --device cuda \
+    --num-workers 2 \
+    --swanlab-mode online

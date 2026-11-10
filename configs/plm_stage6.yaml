@@ -1,0 +1,76 @@
+paths:
+  project_root: ..
+  data_root: ../data
+  cache_root: ../embedding_cache/plm_stage6
+  output_root: ../trained_model/PLM_Stage6
+  swanlog_root: ../swanlog
+  esmc_model: /home/mjp/model/ESMC-300M
+  tcr_bert_model: /home/mjp/model/TCR-Bert
+
+model:
+  peptide_input_dim: 960
+  hla_input_dim: 960
+  tcr_input_dim: 768
+  adapter_hidden_dim: 256
+  model_dim: 128
+  num_attention_heads: 4
+  feedforward_dim: 512
+  adapter_dropout: 0.1
+  attention_dropout: 0.1
+  classifier_dropout: 0.2
+  peptide_min_length: 8
+  peptide_max_length: 15
+  hla_max_length: 34
+  tcr_max_length: 34
+
+training:
+  fold: 4
+  seed: 2026
+  seeds: [2026]
+  num_workers: 2
+  threshold: 0.5
+  pin_memory: true
+  persistent_workers: false
+  device: auto
+
+stage6:
+  # CLI/run_stage6.sh selects each of the three new experiment cells.
+  condition: stage6_phla_only_matched
+  data_subdir: data_triple
+  merged_filename: merged_pseudo.csv
+  train_filename: train_set.csv
+  val_filename: val_set.csv
+  test_filename: test_set.csv
+  verify_merged_manifest: true
+  strict_split_cleanup: true
+  reject_noncanonical_sequences: true
+  micro_batch_size: 4
+  eval_batch_size: 32
+  gradient_accumulation_steps: 16
+  logical_steps_per_epoch: 45533
+  stage1a_epochs: 5
+  stage1b_epochs: 10
+  pht_loss_weight: 1.0
+  phla_loss_weight: 0.3
+  ptcr_loss_weight: 0.2
+  triplet_score_weight: 0.6
+  phla_score_weight: 0.2
+  ptcr_score_weight: 0.2
+  selection_min_delta: 0.0001
+  adapter_lr: 0.000025
+  pretrained_attention_lr: 0.00005
+  triplet_module_lr: 0.0001
+  weight_decay: 0.01
+  scheduler_warmup_ratio: 0.05
+  gradient_clip_norm: 1.0
+  fgm_epsilon: 1.0
+  mixed_precision: bf16
+  log_every_optimizer_steps: 10
+
+swanlab:
+  project: unifyimmun
+  workspace: null
+  mode: online
+  group: plm-stage6-fold{fold}
+  experiment_prefix: PLM-Stage6
+  tags: [ESMC-300M, TCR-BERT, FGM, PH-ablation, stage6]

@@ -321,37 +321,159 @@ $$
 P(\mathrm{binding}\mid HLA,peptide,TCR)
 $$
 
-同一个 peptide 在不同 HLA 中可能呈现不同构象，TCR 对它们的识别也可能完全不同。当前模型的 pTCR 分支未显式输入 HLA，无法直接学习这种 **HLA restriction**。
+同一个 peptide 在不同 HLA 中可能呈现不同构象，暴露给 TCR 的残基和方向也会改变。TCR 对两个序列完全相同、但由不同 HLA 呈递的 peptide，可能产生完全不同的识别结果。当前 pTCR 分支不接收 HLA，只能学习跨 HLA 混合后的平均规律，无法直接表达这种 **HLA restriction**。即使最终把 pHLA 分数与 pTCR 分数相乘或加权，也仍属于两个独立判断的 late fusion，而不是条件化的三元识别。
 
-### 可行改进
+### 更精确的建模目标
 
-设计三路联合交互模块，例如：
+三元任务的正类应表示一个在给定实验语义下成立的
+HLA-peptide-TCR 识别事件，模型输出为：
 
-1. peptide 与 HLA 先进行 cross-attention，形成 pHLA 表征；
-2. TCR 再与 pHLA 表征进行第二层 cross-attention；
-3. 输出三元复合物结合概率。
+$$
+\hat y_{triplet}
+=
+P(Y=1\mid HLA,peptide,TCR)
+$$
 
-即：
+这里的 $Y$ 可能来自结合、四聚体筛选或细胞激活实验，因此论文和代码都应明确标签来源。序列模型预测的是“序列条件下的三元识别/反应概率”，不能直接宣称重建了原子级三维复合物。
+
+### 推荐的串行三元交互
+
+第一版最适合采用两层串行 cross-attention，并始终以 peptide 残基作为查询锚点：
+
+$$
+P=\operatorname{Adapter}_{pep}(H_{pep}),\quad
+M=\operatorname{Adapter}_{HLA}(H_{HLA}),\quad
+T=\operatorname{Adapter}_{TCR}(H_{TCR})
+$$
 
 $$
 H_{pHLA}
 =
-\operatorname{CrossAttn}(H_{pep},H_{HLA})
+\operatorname{CrossAttn}(Q=P,K=M,V=M)
 $$
 
 $$
 H_{complex}
 =
-\operatorname{CrossAttn}(H_{TCR},H_{pHLA})
+\operatorname{CrossAttn}(Q=H_{pHLA},K=T,V=T)
 $$
 
 $$
-\hat y
+\hat y_{triplet}
 =
-f(H_{complex})
+\operatorname{Classifier}
+\left(
+\operatorname{AttnPool}(H_{complex})
+\right)
 $$
 
-对于只有二元标签的样本，可以继续采用多任务或部分监督训练；对于少量三元组数据，则增加三元联合损失。
+这种方向有三个优点：
+
+1. 第一层明确学习 peptide 残基如何受到 HLA 条件化；
+2. 第二层让已经包含 HLA 信息的 peptide 表征与 TCR 逐残基交互，而不是让 HLA 只在最后提供一个全局分数；
+3. 两层注意力分别产生 peptide-HLA 和 peptide-TCR 残基图，便于后续与结构接触、突变扫描和 integrated gradients 对照。
+
+更复杂的下一版可以加入反向的
+$\operatorname{CrossAttn}(Q=T,K=H_{pHLA},V=H_{pHLA})$，再做双向门控融合。但在三元数据有限时，直接增加双向模块会引入更多随机初始化参数；应先用消融实验确认单向串行模型的收益。
+
+### 从现有二元检查点迁移，而不是从头训练
+
+现有 PLM Stage 2 检查点已经包含：
+
+- peptide/HLA 的两个 ESM-C；
+- TCR-BERT；
+- 三个 Adapter；
+- pHLA 与 pTCR 两条 cross-attention、pooling 和分类头。
+
+因此三元模型可以完整加载已有权重，继续复用 pHLA cross-attention；新增的第二层 triplet cross-attention、pooling 和 classifier 分别从 pTCR 对应模块复制初始化。这样既保留了已学习的 peptide-TCR 对齐，又避免随机三元头在训练初期破坏三个大模型。
+
+推荐采用两阶段微调：
+
+1. **Stage 3A：三元头预热。** 冻结三个 PLM、Adapter 和原二元分支，只训练新增 triplet 模块；
+2. **Stage 3B：渐进联合微调。** 解冻三个 PLM 顶部少量 Transformer 层，以及当前任务涉及的 Adapter/cross-attention；
+3. 使用更小的 PLM 学习率和更大的新增模块学习率，并保留梯度裁剪、混合精度和 activation checkpointing。
+
+### 部分监督与二元任务回放
+
+不能把三元组的阴性标签直接当成 pHLA 阴性或 pTCR 阴性。三元识别失败可能只由三条边中的一条造成，也可能是实验灵敏度问题。辅助损失必须来自各自具有可靠二元标签的数据。
+
+可采用：
+
+$$
+L
+=
+\lambda_{triplet}L_{triplet}
++
+\lambda_{pHLA}L_{pHLA}
++
+\lambda_{pTCR}L_{pTCR}
+$$
+
+当前实现以受控任务采样体现权重：每轮完整遍历 triplet 训练集，同时分别回放约四分之一 triplet 样本量的 pHLA 和 pTCR 数据，归一化后的有效比例约为：
+
+$$
+\lambda_{triplet}:\lambda_{pHLA}:\lambda_{pTCR}
+=
+\frac{2}{3}:\frac{1}{6}:\frac{1}{6}
+$$
+
+这能降低共享 peptide encoder 和 Adapter 的灾难性遗忘，同时避免规模最大的 pHLA 数据淹没真正的三元目标。
+
+模型选择也不应只观察训练 loss。推荐使用阈值无关的：
+
+$$
+S_t=\frac{AUROC_t+AUPR_t}{2}
+$$
+
+$$
+S_{joint}
+=
+0.6S_{triplet}
++0.2S_{pHLA}
++0.2S_{pTCR}
+$$
+
+### 当前三元数据需要先做的审计
+
+对现有 `data/data_triple` 的检查表明：
+
+- `merged_pseudo.csv` 共 228,056 条，正负各占 50%，与 train/val/test 的多重集合并集完全一致；
+- 原训练集内部有 15 条重复三元组；
+- train 与 val/test 分别存在 6/4 条完全相同的三元组；
+- 按现有模型的 peptide 8–15 aa、HLA/TCR 最长 34 aa 约束并严格去重后，预计保留 train 205,020、val 11,389、test 11,391 条；
+- 非标准残基应记录并审计，而不能在 tokenizer 内静默变成未知 token 后不报告。
+
+因此清理应在 DataLoader 中可复现地完成，优先级固定为
+train $>$ validation $>$ test；相同三元组出现冲突标签时必须停止训练。原 CSV 保持不变，检查点中保存完整过滤统计。
+
+### 负样本必须真正检验 HLA restriction
+
+现有数据还表现出明显的正负分布差异：负类中大量 peptide 只在负类出现，正负类唯一 peptide 的交集比例很低。模型可能仅凭 peptide 来源或频率区分标签，而不必学习三元相容性。
+
+下一轮数据构造应加入可审计的条件难负样本：
+
+1. 固定真实 peptide-TCR，替换为不匹配但频率相近的 HLA；
+2. 固定真实 HLA-peptide，替换为同长度、同 V/J 使用分布的 TCR；
+3. 固定 HLA 与 TCR，只替换锚定位点或相似度受控的 peptide；
+4. 排除已知阳性、近重复序列和可能同义的 HLA pseudo-sequence；
+5. 分别记录随机负样本与 hard negative 指标，避免前者掩盖真实三元识别难度。
+
+由于随机错配可能产生未被实验检测的真阳性，当前实现只使用 CSV 已给定标签，不在训练时动态制造未经审计的负样本。
+
+### 必须报告的消融和评估
+
+要证明模型确实利用 HLA，而不只是增加参数，至少应比较：
+
+- 原始 pTCR 二元分支；
+- 三元模型；
+- 三元模型移除 HLA；
+- 测试时固定 peptide/TCR、打乱 HLA；
+- 第二层 triplet cross-attention 使用随机初始化与 pTCR 初始化；
+- 冻结 PLM、只训练三元头与渐进解冻。
+
+主结果报告 AUROC、AUPR、MCC、F1、sensitivity、specificity 和 loss。分类阈值只能在 validation 上选择，再固定到 test；同时报告 0.5 阈值与 validation-MCC 最优阈值，并补充 calibration curve、Brier score 和 ECE。
+
+如果 HLA-shuffle 后性能几乎不变，或同一 peptide-TCR 在不同 HLA 下输出差异很小，就不能声称模型学到了 HLA restriction。注意力图也只能作为线索，必须结合 HLA 锚定位点突变、TCR CDR3 扰动和结构接触残基验证。
 
 ---
 

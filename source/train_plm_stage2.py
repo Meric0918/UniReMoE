@@ -58,7 +58,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stage1-checkpoint",
         type=Path,
-        help="Completed stage-1 last_<timestamp>.pt; required for a new run.",
+        help="Completed stage-1 last_<timestamp>.pt for Stage-1 initialisation.",
+    )
+    parser.add_argument(
+        "--from-scratch",
+        action="store_true",
+        help=(
+            "Start Stage 2 without a Stage-1 checkpoint. The configured base "
+            "ESM-C/TCR-BERT weights are still loaded; downstream modules start "
+            "from random initialisation."
+        ),
     )
     parser.add_argument(
         "--resume",
@@ -97,6 +106,19 @@ def make_loaders(config, limit=None):
     train_loaders = {}
     val_loaders = {}
     for task in ("phla", "ptcr"):
+        configured_splits = (
+            config.cache.hla_splits
+            if task == "phla"
+            else config.cache.tcr_splits
+        )
+        validation_splits = [
+            split
+            for split in configured_splits
+            if split == "val" or split.startswith("val_")
+        ]
+        if not validation_splits:
+            raise ValueError(f"No validation splits configured for task {task}")
+
         train_loaders[task] = make_online_dataloader(
             split_path(
                 config.paths.data_root,
@@ -110,13 +132,17 @@ def make_loaders(config, limit=None):
             seed=config.training.seed,
             **common,
         )
-        val_loaders[task] = make_online_dataloader(
+        validation_paths = [
             split_path(
                 config.paths.data_root,
                 task,
-                "val",
+                split,
                 config.training.fold,
-            ),
+            )
+            for split in validation_splits
+        ]
+        val_loaders[task] = make_online_dataloader(
+            validation_paths,
             task,
             batch_size=config.stage2.eval_batch_size,
             shuffle=False,
@@ -205,11 +231,17 @@ def build_model(config, device):
 
 def main() -> None:
     args = parse_args()
-    if args.stage1_checkpoint and args.resume:
-        raise ValueError("Use either --stage1-checkpoint or --resume, not both")
-    if not args.stage1_checkpoint and not args.resume:
+    selected_modes = sum(
+        bool(value)
+        for value in (args.stage1_checkpoint, args.resume, args.from_scratch)
+    )
+    if selected_modes > 1:
         raise ValueError(
-            "A new run requires --stage1-checkpoint; resuming requires --resume"
+            "Use exactly one of --stage1-checkpoint, --resume, or --from-scratch"
+        )
+    if selected_modes == 0:
+        raise ValueError(
+            "Choose --stage1-checkpoint, --resume, or --from-scratch"
         )
 
     resume_state = (
@@ -238,7 +270,8 @@ def main() -> None:
     log_status(
         f"[RUN START] fold={config.training.fold} seed={config.training.seed} "
         f"device={device} swanlab={config.swanlab.mode} "
-        f"run_timestamp={run_timestamp} limit={args.limit}"
+        f"run_timestamp={run_timestamp} limit={args.limit} "
+        f"initialization={'scratch' if args.from_scratch else 'stage1' if args.stage1_checkpoint else 'resume'}"
     )
     log_status(
         f"[SCHEDULE] Stage2A={config.stage2.stage2a_rounds} alternating rounds; "
@@ -249,6 +282,13 @@ def main() -> None:
     )
     model = build_model(config, device)
     source_stage1 = None
+    initialization_mode = (
+        "scratch"
+        if args.from_scratch
+        else "stage1"
+        if args.stage1_checkpoint
+        else None
+    )
     if args.stage1_checkpoint:
         started_at = time.perf_counter()
         log_status(
@@ -262,6 +302,11 @@ def main() -> None:
         log_status(
             f"[STAGE1 LOAD END] source={source_stage1} "
             f"elapsed={time.perf_counter() - started_at:.1f}s"
+        )
+    elif args.from_scratch:
+        log_status(
+            "[INITIALIZATION] scratch mode: pretrained base PLMs loaded; "
+            "Stage-1 downstream checkpoint not loaded"
         )
 
     started_at = time.perf_counter()
@@ -288,6 +333,10 @@ def main() -> None:
         log_status(f"[SWANLAB INIT END] run_id={tracker.run_id or 'disabled'}")
         data_log = {
             "input/mode": "online_stage2",
+            "initialization/mode": initialization_mode or "resume",
+            "initialization/source_stage1_checkpoint": (
+                str(source_stage1) if source_stage1 else None
+            ),
             "stage2/micro_batch_size": config.stage2.micro_batch_size,
             "stage2/eval_batch_size": config.stage2.eval_batch_size,
             "stage2/gradient_accumulation_steps": (
@@ -321,6 +370,7 @@ def main() -> None:
             val_loaders,
             tracker,
             source_stage1_checkpoint=source_stage1,
+            initialization_mode=initialization_mode,
             run_timestamp=run_timestamp,
         )
         if args.resume:

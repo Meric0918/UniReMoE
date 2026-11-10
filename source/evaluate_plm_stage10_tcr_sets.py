@@ -333,7 +333,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         "stage10": stage10_model,
     }
     if stage8_checkpoint is not None:
-        stage8_model = Stage8BindingModel(config.model).to(device)
+        saved_stage8_config = stage8_checkpoint.get("config", {})
+        saved_stage8_training = saved_stage8_config.get("stage8", {})
+        stage8_model = Stage8BindingModel(
+            config.model,
+            encoder_num_layers=saved_stage8_training.get(
+                "sequence_encoder_num_layers", 3
+            ),
+            encoder_dropout=saved_stage8_training.get(
+                "sequence_encoder_dropout", 0.15
+            ),
+        ).to(device)
         stage8_model.load_state_dict(
             extract_stage8_binding_state(stage8_checkpoint),
             strict=True,

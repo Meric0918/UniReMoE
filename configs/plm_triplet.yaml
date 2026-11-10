@@ -1,0 +1,84 @@
+paths:
+  project_root: ..
+  data_root: ../dataset/PHT/classes
+  cache_root: ../embedding_cache/plm_stage1
+  output_root: ../trained_model/PLM_Triplet
+  swanlog_root: ../swanlog
+  esmc_model: /home/mjp/model/ESMC-300M
+  tcr_bert_model: /home/mjp/model/TCR-Bert
+
+model:
+  peptide_input_dim: 960
+  hla_input_dim: 960
+  tcr_input_dim: 768
+  adapter_hidden_dim: 256
+  model_dim: 256
+  num_attention_heads: 8
+  feedforward_dim: 1024
+  adapter_dropout: 0.1
+  attention_dropout: 0.1
+  classifier_dropout: 0.2
+  peptide_min_length: 8
+  peptide_max_length: 15
+  hla_max_length: 34
+  tcr_max_length: 34
+
+training:
+  fold: 1
+  seed: 42
+  seeds: [42, 3407, 2026]
+  num_workers: 2
+  threshold: 0.5
+  pin_memory: true
+  persistent_workers: false
+  device: auto
+
+triplet:
+  data_mode: pht_multitask
+  data_subdir: .
+  merged_filename: merged_pseudo.csv
+  train_filename: train.csv
+  val_filename: val.csv
+  test_filename: test.csv
+  pht_class_dirs: [PHT_000, PHT_111]
+  pht_label_types: ["000", "111"]
+  validation_splits: [val]
+  selection_splits: [val]
+  sampling_strategy: balanced_selected_types
+  verify_merged_manifest: true
+  strict_split_cleanup: true
+  reject_noncanonical_sequences: true
+  micro_batch_size: 4
+  eval_batch_size: 32
+  gradient_accumulation_steps: 16
+  head_warmup_epochs: 2
+  min_rounds: 3
+  max_rounds: 100
+  early_stopping_patience: 20
+  early_stopping_min_delta: 0.001
+  binary_replay_ratio: 0.25
+  triplet_score_weight: 0.3333333333333333
+  phla_score_weight: 0.3333333333333333
+  ptcr_score_weight: 0.3333333333333333
+  peptide_unfrozen_layers: 2
+  hla_unfrozen_layers: 2
+  tcr_unfrozen_layers: 2
+  plm_top_lr: 0.000005
+  plm_lower_lr: 0.0000025
+  adapter_lr: 0.000025
+  pretrained_attention_lr: 0.00005
+  triplet_module_lr: 0.0001
+  weight_decay: 0.01
+  scheduler_warmup_ratio: 0.05
+  gradient_clip_norm: 1.0
+  mixed_precision: bf16
+  gradient_checkpointing: true
+  log_every_optimizer_steps: 1
+
+swanlab:
+  project: unifyimmun
+  workspace: null
+  mode: online
+  group: plm-triplet-fold{fold}
+  experiment_prefix: PLM-Triplet
+  tags: [ESMC-300M, TCR-BERT, triplet, binary-replay, stage3]

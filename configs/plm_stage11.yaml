@@ -1,0 +1,68 @@
+paths:
+  project_root: ..
+  data_root: ../dataset
+  cache_root: ../embedding_cache/plm_stage11
+  output_root: ../trained_model/PLM_Stage11
+  swanlog_root: ../swanlog/PLM_Stage11
+  esmc_model: /home/mjp/model/ESMC-300M
+  tcr_bert_model: /home/mjp/model/TCR-Bert
+
+model:
+  peptide_input_dim: 960
+  hla_input_dim: 960
+  tcr_input_dim: 768
+  adapter_hidden_dim: 256
+  model_dim: 256
+  num_attention_heads: 8
+  feedforward_dim: 1024
+  adapter_dropout: 0.1
+  attention_dropout: 0.1
+  classifier_dropout: 0.2
+  peptide_min_length: 8
+  peptide_max_length: 15
+  hla_max_length: 34
+  tcr_max_length: 34
+
+cache:
+  dtype: float16
+  shard_size: 16384
+  precompute_batch_size: 32
+  compression: null
+  hla_splits: []
+  tcr_splits: []
+
+runtime:
+  fold: 1
+  seed: 42
+  device: auto
+  num_workers: 2
+
+stage11:
+  data_subdir: PHT/classes
+  class_dirs: [PHT_000, PHT_010, PHT_100, PHT_111]
+  ph_train_file: PH/train.csv
+  reject_noncanonical_sequences: true
+  condition: both
+  projection_dim: 256
+  temperature: 0.2
+  contrastive_batch_size: 256
+  batch_size: 256
+  eval_batch_size: 256
+  min_rounds: 5
+  max_rounds: 100
+  early_stopping_patience: 20
+  early_stopping_min_delta: 0.0001
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  scheduler_warmup_ratio: 0.05
+  gradient_clip_norm: 1.0
+  mixed_precision: bf16
+  log_every_steps: 50
+
+swanlab:
+  project: unifyimmun
+  workspace: null
+  mode: online
+  group: plm-stage11-fold{fold}
+  experiment_prefix: PLM-Stage11
+  tags: [ESMC-300M, TCR-BERT, stage11, frozen-PLM, multi-positive-CLIP, alternating]

@@ -1,0 +1,63 @@
+paths:
+  project_root: ..
+  data_root: ../dataset
+  output_root: ../trained_model/PLM_StageAdapter_Random
+  swanlog_root: ../swanlog/PLM_StageAdapter_Random
+  # These encoders load pretrained weights and stay frozen in random_binding mode.
+  esmc_model: /home/mjp/model/ESMC-300M
+  tcr_bert_model: /home/mjp/model/TCR-Bert
+
+model:
+  peptide_input_dim: 960
+  hla_input_dim: 960
+  tcr_input_dim: 768
+  adapter_hidden_dim: 256
+  model_dim: 256
+  num_attention_heads: 8
+  feedforward_dim: 1024
+  adapter_dropout: 0.1
+  attention_dropout: 0.1
+  classifier_dropout: 0.2
+  peptide_min_length: 8
+  peptide_max_length: 15
+  hla_max_length: 34
+  tcr_max_length: 34
+
+runtime:
+  fold: 1
+  seed: 42
+  device: auto
+  num_workers: 2
+
+stage_adapter:
+  initialization: random_binding
+  data_subdir: PHT/classes
+  class_dirs: [PHT_000, PHT_010, PHT_100, PHT_111]
+  train_filename: train.csv
+  val_filename: val.csv
+  reject_noncanonical_sequences: true
+  residual_adapter_dim: 64
+  stage_adapter_a_epochs: 2
+  micro_batch_size: 4
+  eval_batch_size: 32
+  gradient_accumulation_steps: 16
+  min_rounds: 5
+  max_rounds: 100
+  early_stopping_patience: 20
+  early_stopping_min_delta: 0.0001
+  adapter_lr: 0.000025
+  pht_module_lr: 0.0001
+  weight_decay: 0.01
+  scheduler_warmup_ratio: 0.05
+  gradient_clip_norm: 1.0
+  mixed_precision: bf16
+  gradient_checkpointing: true
+  log_every_steps: 50
+
+swanlab:
+  project: unifyimmun
+  workspace: null
+  mode: online
+  group: plm-stage-adapter-random-binding-fold{fold}
+  experiment_prefix: PLM-Stage-Adapter-Random-Binding
+  tags: [ESMC-300M, TCR-BERT, stage-adapter, pretrained-encoders, random-binding-modules, PHT]

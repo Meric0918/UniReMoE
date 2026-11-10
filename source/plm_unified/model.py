@@ -39,8 +39,22 @@ TASK_MODULE_NAMES: dict[Task, tuple[str, ...]] = {
 @dataclass
 class BindingOutput:
     logits: torch.Tensor
+    pooled_embedding: torch.Tensor
     cross_attention: torch.Tensor | None = None
     pooling_weights: torch.Tensor | None = None
+    encoder_embedding: torch.Tensor | None = None
+    adapter_embedding: torch.Tensor | None = None
+    sequence_encoder_embedding: torch.Tensor | None = None
+
+
+def _masked_mean(hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Pool residue-level features into one float32 vector per sample."""
+
+    mask = mask.bool()
+    weights = mask.unsqueeze(-1).to(dtype=torch.float32)
+    values = hidden.float() * weights
+    denominator = weights.sum(dim=1).clamp_min(1.0)
+    return values.sum(dim=1) / denominator
 
 
 class UnifiedBindingModel(nn.Module):
@@ -85,6 +99,7 @@ class UnifiedBindingModel(nn.Module):
         receptor_mask: torch.Tensor,
         *,
         return_attention: bool = False,
+        return_features: bool = False,
     ) -> BindingOutput:
         peptide = self.peptide_adapter(peptide_hidden, peptide_mask)
         if task == "phla":
@@ -112,10 +127,30 @@ class UnifiedBindingModel(nn.Module):
             peptide_mask,
             return_weights=return_attention,
         )
+        encoder_embedding = None
+        adapter_embedding = None
+        if return_features:
+            encoder_embedding = torch.cat(
+                (
+                    _masked_mean(peptide_hidden, peptide_mask),
+                    _masked_mean(receptor_hidden, receptor_mask),
+                ),
+                dim=-1,
+            )
+            adapter_embedding = torch.cat(
+                (
+                    _masked_mean(peptide, peptide_mask),
+                    _masked_mean(receptor, receptor_mask),
+                ),
+                dim=-1,
+            )
         return BindingOutput(
             logits=classifier(pooled),
+            pooled_embedding=pooled,
             cross_attention=attention_weights,
             pooling_weights=pooling_weights,
+            encoder_embedding=encoder_embedding,
+            adapter_embedding=adapter_embedding,
         )
 
     def task_modules(self, task: Task) -> dict[str, nn.Module]:
@@ -138,13 +173,16 @@ class UnifiedBindingModel(nn.Module):
             }
         raise ValueError(f"Unknown task: {task}")
 
-    def set_trainable_task(self, task: Task) -> None:
+    def set_trainable_task(self, task: Task, *, freeze_shared: bool = False) -> None:
         for parameter in self.parameters():
             parameter.requires_grad = False
         active_modules = self.task_modules(task)
         for module in active_modules.values():
             for parameter in module.parameters():
                 parameter.requires_grad = True
+        if freeze_shared:
+            for parameter in self.peptide_adapter.parameters():
+                parameter.requires_grad = False
 
     def trainable_parameter_names(self) -> list[str]:
         return [
@@ -202,6 +240,7 @@ class TaskSpecificBindingModel(nn.Module):
         receptor_mask: torch.Tensor,
         *,
         return_attention: bool = False,
+        return_features: bool = False,
     ) -> BindingOutput:
         if task != self.task:
             raise ValueError(
@@ -231,21 +270,43 @@ class TaskSpecificBindingModel(nn.Module):
             peptide_mask,
             return_weights=return_attention,
         )
+        encoder_embedding = None
+        adapter_embedding = None
+        if return_features:
+            encoder_embedding = torch.cat(
+                (
+                    _masked_mean(peptide_hidden, peptide_mask),
+                    _masked_mean(receptor_hidden, receptor_mask),
+                ),
+                dim=-1,
+            )
+            adapter_embedding = torch.cat(
+                (
+                    _masked_mean(peptide, peptide_mask),
+                    _masked_mean(receptor, receptor_mask),
+                ),
+                dim=-1,
+            )
         return BindingOutput(
             logits=classifier(pooled),
+            pooled_embedding=pooled,
             cross_attention=attention_weights,
             pooling_weights=pooling_weights,
+            encoder_embedding=encoder_embedding,
+            adapter_embedding=adapter_embedding,
         )
 
 
 def extract_task_state_dict(
     state_dict: dict[str, torch.Tensor],
     task: Task,
+    *,
+    module_names: dict[Task, tuple[str, ...]] = TASK_MODULE_NAMES,
 ) -> dict[str, torch.Tensor]:
     """Select the shared peptide path and one task branch from unified weights."""
 
     try:
-        prefixes = tuple(f"{name}." for name in TASK_MODULE_NAMES[task])
+        prefixes = tuple(f"{name}." for name in module_names[task])
     except KeyError as exc:
         raise ValueError(f"Unknown task: {task}") from exc
     selected = {

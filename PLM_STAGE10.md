@@ -65,7 +65,7 @@ KL 使用 float32 计算，Teacher 概率被 detach，梯度只能进入 Student
 每次验证在完全相同且有序的 batch 上同时计算 Teacher 与 Student。单任务分数为：
 
 ```text
-task_score = (AUROC + AUPR) / 2
+task_score = (AUROC + Accuracy + MCC + F1 + AUPR) / 5
 ```
 
 训练 epoch 只有同时满足以下硬门控，才有资格成为 best：
@@ -78,7 +78,7 @@ Student_PT_score >= Teacher_PT_score - 0.002
 合格候选仍按 Stage8 原来的 joint score 选择：
 
 ```text
-joint = 0.6 * PHT_score + 0.2 * PH_score + 0.2 * PT_score
+joint = 0.4 * PHT_score + 0.2 * PH_score + 0.4 * PT_score
 ```
 
 并且必须超过当前 best 加 `early_stopping_min_delta`。不合格 epoch 计为未提升。epoch 0 的 Student 与 Teacher 相同，始终作为安全初始 best；如果后续 epoch 都不合格或 joint 未提升，最终 best 保持 epoch 0。

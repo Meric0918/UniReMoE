@@ -55,6 +55,8 @@ def compute_stage8_loss(
     phla_weight: float = 0.3,
     ptcr_weight: float = 0.2,
     supervised_weight: float = 1.0,
+    use_hierarchy_constraint: bool | None = None,
+    use_pt_implication_constraint: bool | None = None,
     phase: Stage8LossPhase | None = None,
     round_index: int | None = None,
 ) -> Stage8Loss:
@@ -65,6 +67,10 @@ def compute_stage8_loss(
         raise ValueError("epoch must be nonnegative and ramp_epochs positive")
     if round_index is not None and round_index < 0:
         raise ValueError("round_index must be nonnegative")
+    if use_hierarchy_constraint is None:
+        use_hierarchy_constraint = condition is Stage8Condition.FULL
+    if use_pt_implication_constraint is None:
+        use_pt_implication_constraint = condition is Stage8Condition.FULL
     device = pht_logits.device
     masks = {
         kind: torch.tensor([value == kind for value in label_types], device=device)
@@ -103,12 +109,16 @@ def compute_stage8_loss(
     ramp_index = epoch if round_index is None else round_index
     ramp = min(float(ramp_index) / float(ramp_epochs), 1.0)
     constraints_enabled = phase != "stage8a"
-    active_hierarchy = hierarchy_lambda * ramp if constraints_enabled and condition in {
-        Stage8Condition.HIER_ONLY, Stage8Condition.FULL
-    } else 0.0
-    active_pt = pt_implication_lambda * ramp if constraints_enabled and condition in {
-        Stage8Condition.PT_IMP_ONLY, Stage8Condition.FULL
-    } else 0.0
+    active_hierarchy = (
+        hierarchy_lambda * ramp
+        if constraints_enabled and use_hierarchy_constraint
+        else 0.0
+    )
+    active_pt = (
+        pt_implication_lambda * ramp
+        if constraints_enabled and use_pt_implication_constraint
+        else 0.0
+    )
     total = (
         supervised_weight * supervised
         + active_hierarchy * hierarchy

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import hashlib
 from pathlib import Path
 from types import MethodType
 from typing import Any, Literal, Sequence
@@ -36,16 +37,35 @@ class FineTunableResidueEncoder(nn.Module):
         max_length: int,
         *,
         gradient_checkpointing: bool,
+        random_initialization: bool = False,
     ):
         super().__init__()
         self.checkpoint_path = Path(checkpoint_path).resolve()
-        self.checkpoint_fingerprint = checkpoint_fingerprint(self.checkpoint_path)
+        self.random_initialization = random_initialization
+        if random_initialization:
+            # Random encoders need only architecture and tokenizer assets.
+            digest = hashlib.sha256()
+            for asset in sorted(self.checkpoint_path.rglob("*")):
+                if asset.is_file() and asset.suffix in {".json", ".txt", ".model", ".vocab"}:
+                    digest.update(asset.relative_to(self.checkpoint_path).as_posix().encode())
+                    digest.update(asset.read_bytes())
+            self.checkpoint_fingerprint = digest.hexdigest()
+        else:
+            self.checkpoint_fingerprint = checkpoint_fingerprint(self.checkpoint_path)
         self.max_length = max_length
         self.gradient_checkpointing = gradient_checkpointing
         self._active_training = False
 
     def transformer_blocks(self) -> nn.ModuleList:
         raise NotImplementedError
+
+    def training_backbone(self) -> nn.Module:
+        return self.model
+
+    def set_full_training(self) -> None:
+        self.requires_grad_(False)
+        self.training_backbone().requires_grad_(True)
+        self.set_active_training(True)
 
     def set_active_training(self, active: bool) -> None:
         """Use training mode only while this encoder participates in a task."""
@@ -59,7 +79,7 @@ class FineTunableResidueEncoder(nn.Module):
         return torch.no_grad()
 
     def metadata(self) -> dict[str, Any]:
-        return {
+        metadata = {
             "checkpoint_path": str(self.checkpoint_path),
             "checkpoint_fingerprint": self.checkpoint_fingerprint,
             "hidden_size": self.hidden_size,
@@ -68,6 +88,9 @@ class FineTunableResidueEncoder(nn.Module):
             "transformer_layers": len(self.transformer_blocks()),
             "gradient_checkpointing": self.gradient_checkpointing,
         }
+        if self.random_initialization:
+            metadata["initialization"] = "random"
+        return metadata
 
 
 class ESMCFineTuningEncoder(FineTunableResidueEncoder):
@@ -81,11 +104,13 @@ class ESMCFineTuningEncoder(FineTunableResidueEncoder):
         *,
         dtype: str = "bfloat16",
         gradient_checkpointing: bool = True,
+        random_initialization: bool = False,
     ):
         super().__init__(
             checkpoint_path,
             max_length,
             gradient_checkpointing=gradient_checkpointing,
+            random_initialization=random_initialization,
         )
         try:
             from safetensors.torch import load_file as load_safetensors
@@ -106,6 +131,27 @@ class ESMCFineTuningEncoder(FineTunableResidueEncoder):
             local_files_only=True,
         )
         self.model = AutoModelForMaskedLM.from_config(model_config)
+        if not random_initialization:
+            self._load_pretrained_weights(load_safetensors)
+        self.model.to(device=device, dtype=load_dtype)
+        self.model.requires_grad_(False)
+        self.model.eval()
+        backbone = self._backbone()
+        hidden_size = getattr(self.model.config, "d_model", None)
+        if hidden_size is None:
+            hidden_size = getattr(self.model.config, "hidden_size")
+        self.hidden_size = int(hidden_size)
+        self.special_token_ids = set(self.tokenizer.all_special_ids)
+        if not hasattr(backbone, "transformer") or not hasattr(
+            backbone.transformer, "blocks"
+        ):
+            raise RuntimeError(
+                "Unsupported ESM-C structure: expected backbone.transformer.blocks"
+            )
+        if gradient_checkpointing:
+            _enable_esmc_activation_checkpointing(backbone.transformer)
+
+    def _load_pretrained_weights(self, load_safetensors) -> None:
         weights_path = self.checkpoint_path / "model.safetensors"
         if not weights_path.is_file():
             raise FileNotFoundError(f"ESM-C weights not found: {weights_path}")
@@ -128,23 +174,10 @@ class ESMCFineTuningEncoder(FineTunableResidueEncoder):
                 f"missing={missing}, unexpected={unexpected}"
             )
         del state_dict
-        self.model.to(device=device, dtype=load_dtype)
-        self.model.requires_grad_(False)
-        self.model.eval()
-        backbone = self._backbone()
-        hidden_size = getattr(self.model.config, "d_model", None)
-        if hidden_size is None:
-            hidden_size = getattr(self.model.config, "hidden_size")
-        self.hidden_size = int(hidden_size)
-        self.special_token_ids = set(self.tokenizer.all_special_ids)
-        if not hasattr(backbone, "transformer") or not hasattr(
-            backbone.transformer, "blocks"
-        ):
-            raise RuntimeError(
-                "Unsupported ESM-C structure: expected backbone.transformer.blocks"
-            )
-        if gradient_checkpointing:
-            _enable_esmc_activation_checkpointing(backbone.transformer)
+
+    def training_backbone(self) -> nn.Module:
+        # The masked-LM head is absent from residue-level binding prediction.
+        return self._backbone()
 
     def _backbone(self) -> nn.Module:
         backbone = getattr(self.model, "esmc", None)
@@ -199,11 +232,13 @@ class TCRBertFineTuningEncoder(FineTunableResidueEncoder):
         *,
         dtype: str = "bfloat16",
         gradient_checkpointing: bool = True,
+        random_initialization: bool = False,
     ):
         super().__init__(
             checkpoint_path,
             max_length,
             gradient_checkpointing=gradient_checkpointing,
+            random_initialization=random_initialization,
         )
         try:
             from transformers import (
@@ -228,19 +263,8 @@ class TCRBertFineTuningEncoder(FineTunableResidueEncoder):
             local_files_only=True,
         )
         classifier_model = AutoModelForSequenceClassification.from_config(model_config)
-        weights_path = self.checkpoint_path / "pytorch_model.bin"
-        if not weights_path.is_file():
-            raise FileNotFoundError(f"TCR-BERT weights not found: {weights_path}")
-        state_dict = _load_trusted_state_dict(weights_path)
-        missing, unexpected = classifier_model.load_state_dict(state_dict, strict=False)
-        unexpected = [
-            key for key in unexpected if key != "bert.embeddings.position_ids"
-        ]
-        if missing or unexpected:
-            raise RuntimeError(
-                "TCR-BERT state_dict does not match its config: "
-                f"missing={missing}, unexpected={unexpected}"
-            )
+        if not random_initialization:
+            self._load_pretrained_weights(classifier_model)
         self.model = classifier_model.base_model.to(
             device=device,
             dtype=load_dtype,
@@ -260,8 +284,29 @@ class TCRBertFineTuningEncoder(FineTunableResidueEncoder):
                 gradient_checkpointing_kwargs={"use_reentrant": False}
             )
 
+    def _load_pretrained_weights(self, classifier_model) -> None:
+        weights_path = self.checkpoint_path / "pytorch_model.bin"
+        if not weights_path.is_file():
+            raise FileNotFoundError(f"TCR-BERT weights not found: {weights_path}")
+        state_dict = _load_trusted_state_dict(weights_path)
+        missing, unexpected = classifier_model.load_state_dict(state_dict, strict=False)
+        unexpected = [
+            key for key in unexpected if key != "bert.embeddings.position_ids"
+        ]
+        if missing or unexpected:
+            raise RuntimeError(
+                "TCR-BERT state_dict does not match its config: "
+                f"missing={missing}, unexpected={unexpected}"
+            )
+
     def transformer_blocks(self) -> nn.ModuleList:
         return self.model.encoder.layer
+
+    def set_full_training(self) -> None:
+        super().set_full_training()
+        # PHT consumes residue embeddings, so BERT's CLS pooler has no loss.
+        if self.model.pooler is not None:
+            self.model.pooler.requires_grad_(False)
 
     def forward(self, sequences: Sequence[str]) -> ResidueBatch:
         cleaned = [_normalise_sequence(sequence) for sequence in sequences]
@@ -301,7 +346,7 @@ class ProgressiveFineTuningModel(nn.Module):
         tcr_encoder: FineTunableResidueEncoder,
         *,
         peptide_unfrozen_layers: int = 2,
-        hla_unfrozen_layers: int = 1,
+        hla_unfrozen_layers: int = 2,
         tcr_unfrozen_layers: int = 2,
     ):
         super().__init__()
@@ -322,11 +367,12 @@ class ProgressiveFineTuningModel(nn.Module):
                     f"{name} has {len(encoder.transformer_blocks())} blocks, "
                     f"cannot unfreeze {count}"
                 )
-        # Stage 2A keeps HLA ESM-C frozen while the pHLA dataset reuses a very
-        # small set of HLA pseudo-sequences.  Keep those residue embeddings on
-        # the training device so each distinct HLA is encoded only once.  This
-        # is a plain Python cache (not a buffer), so it is deliberately absent
-        # from checkpoints and is rebuilt lazily after resume.
+        # Stage 2A keeps all PLM encoders frozen while the pHLA dataset reuses
+        # a very small set of HLA pseudo-sequences. Keep those residue
+        # embeddings on the training device so each distinct HLA is encoded
+        # only once. This is a plain Python cache (not a buffer), so it is
+        # deliberately absent from checkpoints and is rebuilt lazily after
+        # resume.
         self._stage2a_hla_cache: dict[
             str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         ] = {}
@@ -352,20 +398,18 @@ class ProgressiveFineTuningModel(nn.Module):
             module.requires_grad_(True)
             module.train(True)
 
-        self._activate_encoder(
-            self.peptide_encoder,
-            self.peptide_unfrozen_layers,
-        )
-        if stage == "stage2b" and task == "phla":
-            self._activate_encoder(
-                self.hla_encoder,
-                self.hla_unfrozen_layers,
-            )
-        elif stage == "stage2b" and task == "ptcr":
-            self._activate_encoder(
-                self.tcr_encoder,
-                self.tcr_unfrozen_layers,
-            )
+        if stage == "stage2b":
+            # Stage 2A trains only the Stage-1 downstream binding modules.
+            # The three PLM encoders are opened together at the Stage-2B
+            # transition so that the model does not partially adapt its
+            # shared peptide representation before the joint fine-tuning
+            # stage.
+            for encoder, layer_count in (
+                (self.peptide_encoder, self.peptide_unfrozen_layers),
+                (self.hla_encoder, self.hla_unfrozen_layers),
+                (self.tcr_encoder, self.tcr_unfrozen_layers),
+            ):
+                self._activate_encoder(encoder, layer_count)
         elif task not in {"phla", "ptcr"}:
             raise ValueError(f"Unknown task: {task}")
 

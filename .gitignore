@@ -3,6 +3,7 @@ logs/
 swanlog/
 source/results/
 source/swanlog/
+analysis_results/
 .codegraph/
 /docs
 
@@ -57,3 +58,66 @@ embedding_cache/
 
 # html
 /home/mjp/Project/PLM/UnifyImmun/html
+
+# Ignore files by default; keep source code and Markdown documentation.
+*
+!*/
+!*.md
+!*.py
+!*.sh
+!*.html
+!*.css
+!*.js
+!*.jsx
+!*.mjs
+!*.cjs
+!*.ts
+!*.tsx
+!*.java
+!*.c
+!*.h
+!*.cc
+!*.cpp
+!*.cxx
+!*.hpp
+!*.hxx
+!*.go
+!*.rs
+!*.rb
+!*.php
+!*.pl
+!*.pm
+!*.lua
+!*.r
+!*.R
+!*.m
+!*.swift
+!*.kt
+!*.kts
+!*.scala
+!*.sql
+!*.ps1
+!*.cmd
+!*.bat
+!*.ipynb
+!Makefile
+!makefile
+!GNUmakefile
+!Dockerfile
+!.gitignore
+
+# Avoid descending into generated run logs, which may contain millions of files.
+swanlog/
+**/swanlog/
+
+# Keep configuration files.
+!*.yaml
+!*.yml
+!*.toml
+!*.ini
+!*.cfg
+!*.conf
+!*.properties
+!*.env.example
+!configs/*.json
+!configs/**/*.json

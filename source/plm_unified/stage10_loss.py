@@ -88,7 +88,7 @@ def compute_stage10_loss(
         pt_labels,
         pht_labels,
         label_types,
-        condition=Stage8Condition(condition.value),
+        condition=Stage8Condition.BASELINE,
         epoch=epoch,
         margin=margin,
         hierarchy_lambda=hierarchy_lambda,
@@ -98,6 +98,14 @@ def compute_stage10_loss(
         phla_weight=phla_weight,
         ptcr_weight=ptcr_weight,
         supervised_weight=supervised_weight,
+        use_hierarchy_constraint=condition in {
+            Stage10Condition.HIER_ONLY,
+            Stage10Condition.FULL,
+        },
+        use_pt_implication_constraint=condition in {
+            Stage10Condition.PT_IMP_ONLY,
+            Stage10Condition.FULL,
+        },
     )
     keep_phla = distillation_kl(
         phla_logits,

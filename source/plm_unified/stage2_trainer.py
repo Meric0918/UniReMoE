@@ -20,6 +20,7 @@ from .artifacts import (
     validate_artifact_timestamp,
 )
 from .config import ExperimentConfig
+from .data import stable_group_id
 from .finetuning import FineTuningStage, ProgressiveFineTuningModel
 from .metrics import (
     BinaryMetrics,
@@ -100,6 +101,53 @@ def _metric_summary(metrics: BinaryMetrics) -> str:
     )
 
 
+def _build_group_weight_map(
+    config: ExperimentConfig,
+    task: Task,
+    loader: Any,
+) -> dict[tuple[int, int], float]:
+    """Build the same clipped inverse-sqrt entity-label weights as Stage 1."""
+
+    strategy = getattr(config.training, f"{task}_group_weighting", "none")
+    if strategy == "none":
+        return {}
+    dataset = getattr(loader, "dataset", None)
+    if dataset is None:
+        return {}
+
+    group_ids = getattr(dataset, "group_ids", None)
+    labels = getattr(dataset, "labels", None)
+    rows = getattr(dataset, "rows", None)
+    if group_ids is None and rows is not None:
+        group_ids = [
+            stable_group_id(row[0] if task == "ptcr" else row[1])
+            for row in rows
+        ]
+    if labels is None and rows is not None:
+        labels = [int(row[2]) for row in rows]
+    if group_ids is None or labels is None:
+        return {}
+
+    group_ids = np.asarray(group_ids, dtype=np.int64)
+    labels = np.asarray(labels, dtype=np.int64)
+    if len(group_ids) != len(labels) or not len(labels):
+        return {}
+
+    counts: dict[tuple[int, int], int] = {}
+    for key in zip(group_ids.tolist(), labels.tolist()):
+        counts[key] = counts.get(key, 0) + 1
+    raw = {key: 1.0 / math.sqrt(count) for key, count in counts.items()}
+    mean_weight = float(np.mean(list(raw.values())))
+    if mean_weight <= 0:
+        return {}
+    minimum = config.training.group_weight_min
+    maximum = config.training.group_weight_max
+    return {
+        key: float(np.clip(value / mean_weight, minimum, maximum))
+        for key, value in raw.items()
+    }
+
+
 def build_stage2_optimizer(
     model: ProgressiveFineTuningModel,
     config: ExperimentConfig,
@@ -108,103 +156,157 @@ def build_stage2_optimizer(
     """Build discriminative parameter groups for one unfreezing stage."""
 
     values = config.stage2
+    training = config.training
     groups: list[dict[str, Any]] = []
 
-    def add_group(name: str, parameters, lr: float) -> None:
-        parameters = list(parameters)
-        if parameters:
-            groups.append({"name": name, "params": parameters, "lr": lr})
+    def configured_lr(name: str, fallback: float) -> float:
+        value = getattr(training, name, None)
+        return float(fallback if value is None else value)
 
-    peptide_blocks = model.peptide_encoder.transformer_blocks()
-    add_group(
-        "peptide_plm_last",
-        peptide_blocks[-1].parameters(),
-        values.peptide_top_lr,
-    )
-    if model.peptide_unfrozen_layers > 1:
-        add_group(
-            "peptide_plm_lower",
-            (
+    def add_named_group(name: str, named_parameters, lr: float) -> None:
+        decay_parameters: list[nn.Parameter] = []
+        no_decay_parameters: list[nn.Parameter] = []
+        for parameter_name, parameter in named_parameters:
+            is_no_decay = (
+                training.no_decay_bias_and_norm
+                and (
+                    parameter.ndim <= 1
+                    or parameter_name.endswith("bias")
+                    or "norm" in parameter_name.lower()
+                )
+            )
+            (no_decay_parameters if is_no_decay else decay_parameters).append(
                 parameter
-                for block in peptide_blocks[-model.peptide_unfrozen_layers : -1]
-                for parameter in block.parameters()
-            ),
-            values.peptide_lower_lr,
-        )
+            )
+        if decay_parameters:
+            groups.append(
+                {
+                    "name": f"{name}/decay",
+                    "params": decay_parameters,
+                    "lr": lr,
+                    "weight_decay": values.weight_decay,
+                }
+            )
+        if no_decay_parameters:
+            groups.append(
+                {
+                    "name": f"{name}/no_decay",
+                    "params": no_decay_parameters,
+                    "lr": lr,
+                    "weight_decay": 0.0,
+                }
+            )
 
+    def add_module(name: str, module: nn.Module, lr: float) -> None:
+        add_named_group(name, module.named_parameters(), lr)
+
+    # No PLM parameter group is created for Stage 2A: all three encoders are
+    # frozen there.  Stage 2B opens the final two blocks of all three encoders.
     if stage == "stage2b":
+        peptide_blocks = model.peptide_encoder.transformer_blocks()
+        add_named_group(
+            "peptide_plm_last",
+            peptide_blocks[-1].named_parameters(),
+            values.peptide_top_lr,
+        )
+        if model.peptide_unfrozen_layers > 1:
+            add_named_group(
+                "peptide_plm_lower",
+                (
+                    item
+                    for block in peptide_blocks[
+                        -model.peptide_unfrozen_layers : -1
+                    ]
+                    for item in block.named_parameters()
+                ),
+                values.peptide_lower_lr,
+            )
+
         hla_blocks = model.hla_encoder.transformer_blocks()
-        add_group(
-            "hla_plm_top",
-            (
-                parameter
-                for block in hla_blocks[-model.hla_unfrozen_layers :]
-                for parameter in block.parameters()
-            ),
+        add_named_group(
+            "hla_plm_last",
+            hla_blocks[-1].named_parameters(),
             values.hla_top_lr,
         )
+        if model.hla_unfrozen_layers > 1:
+            add_named_group(
+                "hla_plm_lower",
+                (
+                    item
+                    for block in hla_blocks[-model.hla_unfrozen_layers : -1]
+                    for item in block.named_parameters()
+                ),
+                values.hla_lower_lr,
+            )
+
         tcr_blocks = model.tcr_encoder.transformer_blocks()
-        add_group(
+        add_named_group(
             "tcr_plm_last",
-            tcr_blocks[-1].parameters(),
+            tcr_blocks[-1].named_parameters(),
             values.tcr_top_lr,
         )
         if model.tcr_unfrozen_layers > 1:
-            add_group(
+            add_named_group(
                 "tcr_plm_lower",
                 (
-                    parameter
+                    item
                     for block in tcr_blocks[-model.tcr_unfrozen_layers : -1]
-                    for parameter in block.parameters()
+                    for item in block.named_parameters()
                 ),
                 values.tcr_lower_lr,
             )
 
     binding = model.binding_model
-    add_group(
-        "adapters",
+    module_specs = (
         (
-            parameter
-            for module in (
-                binding.peptide_adapter,
-                binding.hla_adapter,
-                binding.tcr_adapter,
-            )
-            for parameter in module.parameters()
+            "shared_peptide_adapter",
+            binding.peptide_adapter,
+            configured_lr("shared_peptide_adapter_lr", values.adapter_lr),
         ),
-        values.adapter_lr,
-    )
-    add_group(
-        "cross_attention",
         (
-            parameter
-            for module in (
-                binding.phla_cross_attention,
-                binding.ptcr_cross_attention,
-            )
-            for parameter in module.parameters()
+            "hla_adapter",
+            binding.hla_adapter,
+            configured_lr("hla_adapter_lr", values.adapter_lr),
         ),
-        values.cross_attention_lr,
-    )
-    add_group(
-        "pooling",
         (
-            parameter
-            for module in (binding.phla_pooling, binding.ptcr_pooling)
-            for parameter in module.parameters()
+            "tcr_adapter",
+            binding.tcr_adapter,
+            configured_lr("tcr_adapter_lr", values.adapter_lr),
         ),
-        values.pooling_lr,
-    )
-    add_group(
-        "classifiers",
         (
-            parameter
-            for module in (binding.phla_classifier, binding.ptcr_classifier)
-            for parameter in module.parameters()
+            "phla_cross_attention",
+            binding.phla_cross_attention,
+            configured_lr("phla_cross_attention_lr", values.cross_attention_lr),
         ),
-        values.classifier_lr,
+        (
+            "ptcr_cross_attention",
+            binding.ptcr_cross_attention,
+            configured_lr("ptcr_cross_attention_lr", values.cross_attention_lr),
+        ),
+        (
+            "phla_pooling",
+            binding.phla_pooling,
+            configured_lr("phla_pooling_lr", values.pooling_lr),
+        ),
+        (
+            "ptcr_pooling",
+            binding.ptcr_pooling,
+            configured_lr("ptcr_pooling_lr", values.pooling_lr),
+        ),
+        (
+            "phla_classifier",
+            binding.phla_classifier,
+            configured_lr("phla_classifier_lr", values.classifier_lr),
+        ),
+        (
+            "ptcr_classifier",
+            binding.ptcr_classifier,
+            configured_lr("ptcr_classifier_lr", values.classifier_lr),
+        ),
     )
-    return torch.optim.AdamW(groups, weight_decay=values.weight_decay)
+    for name, module, learning_rate in module_specs:
+        add_module(name, module, learning_rate)
+    return torch.optim.AdamW(groups, weight_decay=0.0)
 
 
 class Stage2Trainer:
@@ -219,6 +321,7 @@ class Stage2Trainer:
         tracker: SwanLabTracker,
         *,
         source_stage1_checkpoint: str | Path | None = None,
+        initialization_mode: str | None = None,
         run_timestamp: Optional[str] = None,
     ):
         self.model = model
@@ -228,7 +331,43 @@ class Stage2Trainer:
         self.tracker = tracker
         self.device = resolve_device(config.training.device)
         self.model.to(self.device)
-        self.criterion = nn.CrossEntropyLoss()
+        resolved_initialization_mode = initialization_mode or (
+            "stage1" if source_stage1_checkpoint else "scratch"
+        )
+        if resolved_initialization_mode not in {"stage1", "scratch"}:
+            raise ValueError(
+                "initialization_mode must be 'stage1' or 'scratch'"
+            )
+        if resolved_initialization_mode == "stage1" and not source_stage1_checkpoint:
+            raise ValueError(
+                "stage1 initialization requires source_stage1_checkpoint"
+            )
+        if resolved_initialization_mode == "scratch" and source_stage1_checkpoint:
+            raise ValueError(
+                "scratch initialization cannot include source_stage1_checkpoint"
+            )
+        self.initialization_mode = resolved_initialization_mode
+        self.train_criteria = {
+            "phla": nn.CrossEntropyLoss(
+                reduction="none",
+                label_smoothing=config.training.phla_label_smoothing,
+            ),
+            "ptcr": nn.CrossEntropyLoss(
+                reduction="none",
+                label_smoothing=config.training.ptcr_label_smoothing,
+            ),
+        }
+        # Validation remains an unsmoothed, unweighted NLL just like Stage 1.
+        self.eval_criterion = nn.CrossEntropyLoss()
+        self.criterion = self.eval_criterion
+        self._group_weight_maps = {
+            task: _build_group_weight_map(
+                config,
+                task,
+                self.train_loaders.get(task),
+            )
+            for task in ("phla", "ptcr")
+        }
         self.stage: FineTuningStage | str = "stage2a"
         self.stage2a_round = 0
         self.stage2b_round = 0
@@ -306,6 +445,7 @@ class Stage2Trainer:
         _console_log(
             "[STAGE2 INIT] "
             f"fold={config.training.fold} seed={config.training.seed} "
+            f"initialization={self.initialization_mode} "
             f"device={self.device} precision={config.stage2.mixed_precision} "
             f"micro_batch={config.stage2.micro_batch_size} "
             f"eval_batch={config.stage2.eval_batch_size} "
@@ -320,6 +460,34 @@ class Stage2Trainer:
             "policy=one-residue-embedding-per-unique-HLA; "
             "automatically cleared before Stage2B"
         )
+
+    def _sample_weights_for_batch(
+        self,
+        task: Task,
+        batch: Mapping[str, Any],
+    ) -> torch.Tensor | None:
+        weight_map = self._group_weight_maps.get(task, {})
+        group_ids = batch.get("group_ids")
+        labels = batch.get("labels")
+        if not weight_map or group_ids is None or labels is None:
+            return None
+        return torch.tensor(
+            [
+                weight_map.get((int(group), int(label)), 1.0)
+                for group, label in zip(group_ids, labels)
+            ],
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+    @staticmethod
+    def _weighted_mean(
+        values: torch.Tensor,
+        weights: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if weights is None:
+            return values.mean()
+        return (values * weights).sum() / weights.sum().clamp_min(1e-8)
 
     def _build_optimization(self, stage: FineTuningStage) -> None:
         self.optimizer_stage = stage
@@ -420,13 +588,18 @@ class Stage2Trainer:
                 dtype=torch.long,
                 non_blocking=self.device.type == "cuda",
             )
+            sample_weights = self._sample_weights_for_batch(task, batch)
             with self._autocast():
                 output = self.model(
                     task,
                     batch["peptide_sequences"],
                     batch["receptor_sequences"],
                 )
-                loss = self.criterion(output.logits, batch_labels)
+                per_sample_loss = self.train_criteria[task](
+                    output.logits,
+                    batch_labels,
+                )
+                loss = self._weighted_mean(per_sample_loss, sample_weights)
             self.scaler.scale(loss / window_size).backward()
 
             batch_samples = int(batch_labels.shape[0])
@@ -593,7 +766,7 @@ class Stage2Trainer:
                     batch["peptide_sequences"],
                     batch["receptor_sequences"],
                 )
-                loss = self.criterion(output.logits, batch_labels)
+                loss = self.eval_criterion(output.logits, batch_labels)
             batch_samples = int(batch_labels.shape[0])
             samples += batch_samples
             loss_sum += float(loss.detach().cpu()) * batch_samples
@@ -784,6 +957,7 @@ class Stage2Trainer:
                 "best_task_scores": self.best_task_scores,
                 "best_task_val_metrics": self.best_task_val_metrics,
                 "source_stage1_checkpoint": self.source_stage1_checkpoint,
+                "initialization_mode": self.initialization_mode,
                 "input_mode": "online_stage2",
                 "fgm_enabled": False,
             },
@@ -953,6 +1127,7 @@ class Stage2Trainer:
             "config": self.config.to_dict(),
             "encoder_metadata": self.model.encoder_metadata(),
             "source_stage1_checkpoint": self.source_stage1_checkpoint,
+            "initialization_mode": self.initialization_mode,
             "data_filter_stats": self.data_filter_stats,
             "fgm_enabled": False,
             "run_timestamp": self.run_timestamp,
@@ -1054,6 +1229,10 @@ class Stage2Trainer:
         self.source_stage1_checkpoint = checkpoint.get(
             "source_stage1_checkpoint"
         )
+        self.initialization_mode = checkpoint.get(
+            "initialization_mode",
+            "stage1" if self.source_stage1_checkpoint else "scratch",
+        )
         optimizer_stage = checkpoint.get(
             "optimizer_stage",
             "stage2a" if self.stage == "stage2a" else "stage2b",
@@ -1100,6 +1279,7 @@ class Stage2Trainer:
                 for task, path in self.task_checkpoint_paths.items()
             },
             "source_stage1_checkpoint": self.source_stage1_checkpoint,
+            "initialization_mode": self.initialization_mode,
         }
 
 
@@ -1238,5 +1418,11 @@ def build_stage2_task_checkpoint_state(
         "fgm_enabled": False,
         "source_stage1_checkpoint": training_checkpoint.get(
             "source_stage1_checkpoint"
+        ),
+        "initialization_mode": training_checkpoint.get(
+            "initialization_mode",
+            "stage1"
+            if training_checkpoint.get("source_stage1_checkpoint")
+            else "scratch",
         ),
     }

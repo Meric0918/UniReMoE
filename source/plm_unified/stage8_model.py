@@ -1,4 +1,4 @@
-"""Cached-feature Stage-8 model with a shared single-pass three-head forward."""
+"""Online Stage-8 model with a shared single-pass three-head forward."""
 
 from __future__ import annotations
 
@@ -13,8 +13,12 @@ from .finetuning import (
     ProgressiveFineTuningModel,
     TCRBertFineTuningEncoder,
 )
+from .model import BindingOutput, _masked_mean
+from .stage1_encoder_model import SequenceEncoder
 from .triplet_model import (
     TripletBindingModel,
+    TripletBindingOutput,
+    _transfer_adapter_projection_to_sequence_encoders,
     initialise_binding_from_stage1,
 )
 
@@ -34,7 +38,167 @@ class Stage8BindingOutput:
 
 
 class Stage8BindingModel(TripletBindingModel):
-    """Stage-3 downstream modules trained against frozen residue caches."""
+    """Stage-8 task heads with the Stage-1 Encoder architecture."""
+
+    def __init__(
+        self,
+        config: ModelConfig,
+        *,
+        encoder_num_layers: int = 3,
+        encoder_dropout: float = 0.15,
+    ):
+        super().__init__(config)
+        del self.peptide_adapter
+        del self.hla_adapter
+        del self.tcr_adapter
+
+        encoder_kwargs = {
+            "model_dim": config.model_dim,
+            "num_heads": config.num_attention_heads,
+            "feedforward_dim": config.feedforward_dim,
+            "num_layers": encoder_num_layers,
+            "dropout": encoder_dropout,
+        }
+        self.peptide_encoder = SequenceEncoder(
+            config.peptide_input_dim, **encoder_kwargs
+        )
+        self.hla_encoder = SequenceEncoder(config.hla_input_dim, **encoder_kwargs)
+        self.tcr_encoder = SequenceEncoder(config.tcr_input_dim, **encoder_kwargs)
+
+    def task_modules(
+        self, task: Literal["phla", "ptcr"]
+    ) -> dict[str, torch.nn.Module]:
+        if task == "phla":
+            names = (
+                "peptide_encoder", "hla_encoder", "phla_cross_attention",
+                "phla_pooling", "phla_classifier",
+            )
+        elif task == "ptcr":
+            names = (
+                "peptide_encoder", "tcr_encoder", "ptcr_cross_attention",
+                "ptcr_pooling", "ptcr_classifier",
+            )
+        else:
+            raise ValueError(f"Unknown Stage-8 task: {task}")
+        return {name: getattr(self, name) for name in names}
+
+    def triplet_modules(self) -> dict[str, torch.nn.Module]:
+        return {
+            "peptide_encoder": self.peptide_encoder,
+            "hla_encoder": self.hla_encoder,
+            "tcr_encoder": self.tcr_encoder,
+            "phla_cross_attention": self.phla_cross_attention,
+            **self.new_triplet_modules(),
+        }
+
+    def fgm_modules(
+        self, task: Literal["phla", "ptcr"]
+    ) -> dict[str, torch.nn.Module]:
+        return {
+            name: module
+            for name, module in self.task_modules(task).items()
+            if name.endswith("_encoder")
+        }
+
+    def forward_triplet(
+        self,
+        peptide_hidden: torch.Tensor,
+        peptide_mask: torch.Tensor,
+        hla_hidden: torch.Tensor,
+        hla_mask: torch.Tensor,
+        tcr_hidden: torch.Tensor,
+        tcr_mask: torch.Tensor,
+        *,
+        return_attention: bool = False,
+    ) -> TripletBindingOutput:
+        peptide = self.peptide_encoder(peptide_hidden, peptide_mask)
+        hla = self.hla_encoder(hla_hidden, hla_mask)
+        tcr = self.tcr_encoder(tcr_hidden, tcr_mask)
+        phla_sequence, phla_attention = self.phla_cross_attention(
+            peptide,
+            hla,
+            peptide_mask,
+            hla_mask,
+            return_attention=return_attention,
+        )
+        pht_sequence, pht_attention = self.triplet_cross_attention(
+            phla_sequence,
+            tcr,
+            peptide_mask,
+            tcr_mask,
+            return_attention=return_attention,
+        )
+        pooled, pooling_weights = self.triplet_pooling(
+            pht_sequence,
+            peptide_mask,
+            return_weights=return_attention,
+        )
+        return TripletBindingOutput(
+            logits=self.triplet_classifier(pooled),
+            phla_cross_attention=phla_attention,
+            triplet_cross_attention=pht_attention,
+            pooling_weights=pooling_weights,
+        )
+
+    def forward(
+        self,
+        task: Literal["phla", "ptcr"],
+        peptide_hidden: torch.Tensor,
+        peptide_mask: torch.Tensor,
+        receptor_hidden: torch.Tensor,
+        receptor_mask: torch.Tensor,
+        *,
+        return_attention: bool = False,
+        return_features: bool = False,
+    ) -> BindingOutput:
+        peptide = self.peptide_encoder(peptide_hidden, peptide_mask)
+        if task == "phla":
+            receptor = self.hla_encoder(receptor_hidden, receptor_mask)
+            cross_attention = self.phla_cross_attention
+            pooling = self.phla_pooling
+            classifier = self.phla_classifier
+        elif task == "ptcr":
+            receptor = self.tcr_encoder(receptor_hidden, receptor_mask)
+            cross_attention = self.ptcr_cross_attention
+            pooling = self.ptcr_pooling
+            classifier = self.ptcr_classifier
+        else:
+            raise ValueError(f"Unknown Stage-8 task: {task}")
+
+        sequence, attention_weights = cross_attention(
+            peptide,
+            receptor,
+            peptide_mask,
+            receptor_mask,
+            return_attention=return_attention,
+        )
+        pooled, pooling_weights = pooling(
+            sequence, peptide_mask, return_weights=return_attention
+        )
+        encoder_embedding = sequence_encoder_embedding = None
+        if return_features:
+            encoder_embedding = torch.cat(
+                (
+                    _masked_mean(peptide_hidden, peptide_mask),
+                    _masked_mean(receptor_hidden, receptor_mask),
+                ),
+                dim=-1,
+            )
+            sequence_encoder_embedding = torch.cat(
+                (
+                    _masked_mean(peptide, peptide_mask),
+                    _masked_mean(receptor, receptor_mask),
+                ),
+                dim=-1,
+            )
+        return BindingOutput(
+            logits=classifier(pooled),
+            pooled_embedding=pooled,
+            cross_attention=attention_weights,
+            pooling_weights=pooling_weights,
+            encoder_embedding=encoder_embedding,
+            sequence_encoder_embedding=sequence_encoder_embedding,
+        )
 
     def forward_all(
         self,
@@ -45,9 +209,9 @@ class Stage8BindingModel(TripletBindingModel):
         tcr_hidden: torch.Tensor,
         tcr_mask: torch.Tensor,
     ) -> Stage8BindingOutput:
-        peptide = self.peptide_adapter(peptide_hidden, peptide_mask)
-        hla = self.hla_adapter(hla_hidden, hla_mask)
-        tcr = self.tcr_adapter(tcr_hidden, tcr_mask)
+        peptide = self.peptide_encoder(peptide_hidden, peptide_mask)
+        hla = self.hla_encoder(hla_hidden, hla_mask)
+        tcr = self.tcr_encoder(tcr_hidden, tcr_mask)
 
         phla_sequence, _ = self.phla_cross_attention(
             peptide, hla, peptide_mask, hla_mask, return_attention=False
@@ -75,10 +239,40 @@ class Stage8BindingModel(TripletBindingModel):
 
 
 def build_stage8_binding_model(
-    config: ModelConfig, stage3_binding_state: dict, *, device: torch.device
+    config: ModelConfig,
+    stage3_binding_state: dict,
+    *,
+    device: torch.device,
+    encoder_num_layers: int = 3,
+    encoder_dropout: float = 0.15,
 ) -> Stage8BindingModel:
-    model = Stage8BindingModel(config)
-    model.load_state_dict(stage3_binding_state, strict=True)
+    model = Stage8BindingModel(
+        config,
+        encoder_num_layers=encoder_num_layers,
+        encoder_dropout=encoder_dropout,
+    )
+    transferable_state, transferred_entities = (
+        _transfer_adapter_projection_to_sequence_encoders(
+            stage3_binding_state, model
+        )
+    )
+    missing, unexpected = model.load_state_dict(transferable_state, strict=False)
+    allowed_missing = tuple(
+        prefix
+        for entity in transferred_entities
+        for prefix in (
+            f"{entity}_encoder.layers.",
+            f"{entity}_encoder.final_norm.",
+        )
+    )
+    disallowed_missing = [
+        key for key in missing if not key.startswith(allowed_missing)
+    ]
+    if disallowed_missing or unexpected:
+        raise RuntimeError(
+            "Stage-3 to Stage-8 state mismatch: "
+            f"missing={disallowed_missing}, unexpected={unexpected}"
+        )
     model.requires_grad_(True)
     return model.to(device)
 
@@ -168,6 +362,7 @@ def initialise_stage8_from_stage1(
             encoder_metadata=model.encoder_metadata(),
             expected_sha256=expected_sha256,
             require_joint_checkpoint=True,
+            transfer_sequence_encoder_projections=True,
         )
     except (ValueError, RuntimeError) as error:
         message = str(error).replace("Stage-3", "Stage-8").replace(
@@ -208,7 +403,11 @@ def build_progressive_stage8_model(
         if actual != expected:
             raise ValueError(f"{name} hidden size does not match model config")
     model = ProgressiveStage8FineTuningModel(
-        Stage8BindingModel(config.model),
+        Stage8BindingModel(
+            config.model,
+            encoder_num_layers=config.stage8.sequence_encoder_num_layers,
+            encoder_dropout=config.stage8.sequence_encoder_dropout,
+        ),
         peptide_encoder,
         hla_encoder,
         tcr_encoder,

@@ -10,7 +10,7 @@ class SequenceAdapter(nn.Module):
     def __init__(
         self,
         input_dim: int,
-        model_dim: int = 128,
+        model_dim: int = 256,
         hidden_dim: int = 256,
         dropout: float = 0.1,
     ):
@@ -31,9 +31,9 @@ class SequenceAdapter(nn.Module):
 class CrossAttentionBlock(nn.Module):
     def __init__(
         self,
-        model_dim: int = 128,
-        num_heads: int = 4,
-        feedforward_dim: int = 512,
+        model_dim: int = 256,
+        num_heads: int = 8,
+        feedforward_dim: int = 1024,
         dropout: float = 0.1,
     ):
         super().__init__()
@@ -87,7 +87,7 @@ class CrossAttentionBlock(nn.Module):
 
 
 class MaskedAttentionPooling(nn.Module):
-    def __init__(self, model_dim: int = 128):
+    def __init__(self, model_dim: int = 256):
         super().__init__()
         self.score = nn.Linear(model_dim, 1)
 
@@ -109,7 +109,7 @@ class MaskedAttentionPooling(nn.Module):
 
 
 class BindingClassifier(nn.Module):
-    def __init__(self, model_dim: int = 128, dropout: float = 0.2):
+    def __init__(self, model_dim: int = 256, dropout: float = 0.2):
         super().__init__()
         self.network = nn.Sequential(
             nn.Linear(model_dim, 64),

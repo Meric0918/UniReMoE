@@ -12,9 +12,13 @@ from .config import CacheConfig, ModelConfig, SwanLabConfig
 
 class Stage8Condition(str, Enum):
     BASELINE = "baseline"
-    HIER_ONLY = "hier_only"
-    PT_IMP_ONLY = "pt_imp_only"
     FULL = "full"
+
+
+STAGE8_TRAINING_CONDITIONS = (
+    Stage8Condition.BASELINE,
+    Stage8Condition.FULL,
+)
 
 
 @dataclass
@@ -66,11 +70,13 @@ class Stage8TrainingConfig:
     peptide_unfrozen_layers: int = 2
     hla_unfrozen_layers: int = 2
     tcr_unfrozen_layers: int = 2
+    sequence_encoder_num_layers: int = 3
+    sequence_encoder_dropout: float = 0.15
     min_rounds: int = 5
-    max_rounds: int = 15
-    max_epochs: int = 15
+    max_rounds: int = 100
+    max_epochs: int = 100
     min_epochs: int = 5
-    early_stopping_patience: int = 5
+    early_stopping_patience: int = 20
     early_stopping_min_delta: float = 1e-4
     pht_loss_weight: float = 1.0
     phla_loss_weight: float = 0.3
@@ -83,7 +89,7 @@ class Stage8TrainingConfig:
     pt_implication_lambda: float = 0.03
     constraint_ramp_epochs: int = 5
     joint_degradation_tolerance: float = 0.002
-    adapter_lr: float = 2.5e-5
+    sequence_encoder_lr: float = 2.5e-5
     pretrained_attention_lr: float = 5e-5
     triplet_module_lr: float = 1e-4
     weight_decay: float = 1e-2
@@ -103,7 +109,7 @@ class Stage8TrainingConfig:
 
     @property
     def conditions(self) -> tuple[Stage8Condition, ...]:
-        return tuple(Stage8Condition)
+        return STAGE8_TRAINING_CONDITIONS
 
 
 @dataclass
@@ -173,6 +179,7 @@ class Stage8ExperimentConfig:
             "hla_unfrozen_layers", "tcr_unfrozen_layers", "min_rounds",
             "max_rounds", "max_epochs", "min_epochs",
             "early_stopping_patience", "constraint_ramp_epochs",
+            "sequence_encoder_num_layers",
         ):
             if getattr(values, name) < 1:
                 raise ValueError(f"stage8.{name} must be positive")
@@ -185,7 +192,7 @@ class Stage8ExperimentConfig:
         for name in (
             "pht_loss_weight", "phla_loss_weight", "ptcr_loss_weight",
             "constraint_margin", "hierarchy_lambda", "pt_implication_lambda",
-            "adapter_lr", "pretrained_attention_lr", "triplet_module_lr",
+            "sequence_encoder_lr", "pretrained_attention_lr", "triplet_module_lr",
         ):
             if getattr(values, name) < 0:
                 raise ValueError(f"stage8.{name} cannot be negative")
@@ -193,6 +200,8 @@ class Stage8ExperimentConfig:
             raise ValueError("Stage-8 selection weights must sum to 1")
         if values.mixed_precision not in {"none", "fp16", "bf16"}:
             raise ValueError("stage8.mixed_precision must be none, fp16, or bf16")
+        if not 0 <= values.sequence_encoder_dropout < 1:
+            raise ValueError("stage8.sequence_encoder_dropout must be in [0, 1)")
         if self.cache.dtype != "float16":
             raise ValueError("Stage-8 cache dtype must be float16")
         if require_files:

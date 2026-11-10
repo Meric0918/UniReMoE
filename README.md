@@ -56,6 +56,13 @@ cross-attention branches, and module-targeted FGM.
 See [PLM_STAGE1.md](PLM_STAGE1.md) for checkpoint validation, cache construction,
 three-seed SwanLab experiments, resume, and evaluation commands.
 
+### Stage1 with sequence encoders
+
+The independent `stage1_encoder` experiment replaces the three adapters with
+Transformer encoders with three layers and eight heads over the same frozen PLM caches.
+It supports training, resume, evaluation, task model export, and UMAP snapshots.
+See [PLM_STAGE1_ENCODER.md](PLM_STAGE1_ENCODER.md) for parameters and commands.
+
 ### ESM-C + TCR-BERT stage-2 fine-tuning
 
 Stage 2 loads a completed unified stage-1 `last` checkpoint, then progressively
@@ -66,6 +73,27 @@ See [PLM_STAGE2.md](PLM_STAGE2.md) for the exact 2A/2B unfreezing schedule,
 dynamic learning rates, full-PLM checkpoint behavior, training, and resume
 commands.
 
+### Hyper-PMT heterogeneous hypergraph Stage14
+
+Stage14 is an isolated Stage8-compatible branch that synchronously fuses
+peptide, HLA, and TCR residue embeddings through a shared two-layer
+Hyper-PMT encoder. See [PLM_STAGE14.md](PLM_STAGE14.md) for the model,
+four-condition training commands, checkpoint contract, and benchmark evaluation.
+
+### Stage15 pairwise Shared Hyper-PMT
+
+Stage15 keeps the Stage1 frozen-cache PH/PT training contract while replacing
+the two pairwise cross-attention modules with the Shared Hyper-PMT introduced by
+Stage14. It trains all downstream modules from scratch and remains independent
+of the PHT/prior/constraint branches. See [PLM_STAGE15.md](PLM_STAGE15.md).
+
+
+### Stage PHT with sequence encoders
+
+Stage PHT trains three random sequence encoders over frozen pretrained ESM-C and
+TCR-BERT features, followed by the Stage Adapter PHT sequential cross-attention
+path. It uses the same PHT data, balanced supervision, and two-phase training.
+See [PLM_STAGE_PHT.md](PLM_STAGE_PHT.md) for configuration and commands.
 
 ### Model testing
 Given the fine-tuned model or our trained model (saved in trained_model folder), you can evaluate it on our demo test sets using the following scripts.
@@ -106,6 +134,7 @@ Note: Ensure that the file paths and script names provided in the commands match
 
 ### Customizing output
 To customize the output results, users can modify the parameters within each script. Detailed comments within the code provide descriptions and guidance for parameter adjustments.
+
 
 ## Support
 For further assistance, bug reports, or to request new features, please contact us at hliu@njtech.edu.cn or open an issue on the [GitHub repository page](https://github.com/hliulab/unifyimmun).

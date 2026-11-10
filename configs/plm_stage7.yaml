@@ -1,0 +1,53 @@
+paths:
+  project_root: ..
+  data_root: ../data
+  output_root: ../trained_model/PLM_Stage7
+  esmc_model: /home/mjp/model/ESMC-300M
+  tcr_bert_model: /home/mjp/model/TCR-Bert
+
+model:
+  peptide_input_dim: 960
+  hla_input_dim: 960
+  tcr_input_dim: 768
+  adapter_hidden_dim: 256
+  model_dim: 128
+  num_attention_heads: 4
+  feedforward_dim: 512
+  adapter_dropout: 0.1
+  attention_dropout: 0.1
+  classifier_dropout: 0.2
+  peptide_min_length: 8
+  peptide_max_length: 15
+  hla_max_length: 34
+  tcr_max_length: 34
+
+runtime:
+  fold: 4
+  seed: 2026
+  device: auto
+  num_workers: 0
+
+stage7:
+  triplet_data_subdir: data_triple
+  triplet_merged_filename: merged_pseudo.csv
+  triplet_train_filename: train_set.csv
+  triplet_val_filename: val_set.csv
+  triplet_test_filename: test_set.csv
+  phla_data_subdir: data_HLA
+  phla_train_template: train_fold_{fold}.csv
+  verify_merged_manifest: true
+  strict_split_cleanup: true
+  reject_noncanonical_sequences: true
+  # Current repository has no complete, aligned allele metadata table.
+  metadata_mode: pseudo_only
+  hla_metadata_csv: null
+  max_decoys_per_anchor: 5
+  require_decoy_hla_seen_in_triplet_train: true
+  include_all_tetrads: true
+  include_legacy_hla_shift: true
+  # Match the Stage-3 training precision when loading its fine-tuned PLMs.
+  encoder_dtype: bfloat16
+  encoder_batch_size: 32
+  score_batch_size: 256
+  bootstrap_samples: 5000
+  permutation_samples: 100000

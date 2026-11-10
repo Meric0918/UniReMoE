@@ -31,13 +31,15 @@ SHA256: 5cef56d3f5e392828d23659a53df20f7c8ec0f4678e5d639ec1b798ed02a5f96
 
 ## Stage 8A：共享 PHT warmup
 
-Stage 8A 从上述 Stage 1 checkpoint 开始，训练两轮；只开放新 triplet/PHT 模块，三个在线 PLM、已有 pHLA/pTCR adapter、attention 和 classifier 均冻结。Stage 8A 不使用 PH/PT replay，也不启用任何一致性约束。
+Stage 8 的肽段、HLA、TCR 残基表示模块使用与 Stage 1 Encoder 相同的 `SequenceEncoder`：输入维度分别为 960/960/768，投影到 256 维，再经过 3 层、8 头、1024 维前馈层、前归一化 self-attention 和最终 LayerNorm，dropout 为 0.15。Stage 1 checkpoint 中 Adapter 的首层线性投影和 LayerNorm 会迁移到新 Encoder；新 self-attention 层及最终 LayerNorm 随机初始化。
+
+Stage 8A 从上述 Stage 1 checkpoint 开始，训练两轮；只开放新 triplet/PHT 模块，三个在线 PLM、已有 pHLA/pTCR SequenceEncoder、attention 和 classifier 均冻结。Stage 8A 不使用 PH/PT replay，也不启用任何一致性约束。
 
 PHT 监督采用四类平衡 batch。`111` 的总交叉熵权重为 0.5，`000`、`010`、`100` 三类合并后的总权重为 0.5；另保留 PH/PT 监督项的配置权重 `0.3/0.2`。micro batch 为 4，gradient accumulation 为 16，有效 batch 为 64。
 
-## Stage 8B：四条件在线训练
+## Stage 8B：baseline/full 在线训练
 
-四个条件 `baseline`、`hier_only`、`pt_imp_only`、`full` 共享同一个、字节一致的 Stage 8A warmup checkpoint。每个 Stage 8B round 的固定次序为：
+`baseline` 和 `full` 共享同一个、字节一致的 Stage 8A warmup checkpoint。Stage 8B 会训练下游 SequenceEncoder 与注意力模块，并解冻在线 PLM 顶层。baseline 不启用一致性约束；full 同时启用 hierarchy 和 PT implication 约束。每个 Stage 8B round 的固定次序为：
 
 ```text
 PH replay → PT replay → balanced four-class joint pass
@@ -77,11 +79,22 @@ joint = 0.4 * score(PHT) + 0.2 * score(PH) + 0.4 * score(PT)
   --device cuda
 ```
 
-一次 warmup、四个条件：
+一次 warmup、两个条件：
 
 ```bash
 ./run_stage8.sh ablations --stage1-checkpoint \
   trained_model/PLM_Unified_PH_PT/fold_1/seed_42/best_round/best_joint_20260824_174202_510837.pt \
+  --device cuda
+```
+
+`ablations` 默认同时启动 `baseline` 和 `full` 两个 Stage 8B 进程；每个条件使用独立输出目录和独立 SwanLab run。每个已完成 round 会记录训练 loss/约束项、三项验证任务指标、joint score、阈值、约束违反率和当前 checkpoint 状态。若机器资源不足，可显式添加 `--sequential` 改为串行。
+
+已有 warmup 或 baseline last checkpoint 时，可以跳过 warmup 并从断点恢复 baseline：
+
+```bash
+./run_stage8.sh ablations \
+  --warmup-checkpoint trained_model/PLM_Stage8/fold_1/seed_42/warmup/stage8a_best_pht_TIMESTAMP.pt \
+  --resume-baseline trained_model/PLM_Stage8/fold_1/seed_42/baseline/stage8_last_TIMESTAMP.pt \
   --device cuda
 ```
 
@@ -90,6 +103,8 @@ joint = 0.4 * score(PHT) + 0.2 * score(PH) + 0.4 * score(PT)
 ## V2 产物
 
 由于 Stage 8B 会微调 PLM，三类 V2 artifact 都保存完整的 encoder-inclusive model state：
+
+本次表示模块从 Adapter 切换为 SequenceEncoder 后，旧 Adapter 版 Stage 8 checkpoint 与新训练 contract 不兼容，需要重新 warmup 和训练。
 
 - `stage8a_best_pht_TIMESTAMP.pt`：共享 Stage 8A warmup，无 optimizer state；
 - `stage8_best_TIMESTAMP.pt`：当前条件的完整部署模型，无 optimizer state；

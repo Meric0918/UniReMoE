@@ -20,12 +20,16 @@ def evaluate_model(
     loader,
     task: Task,
     config: ExperimentConfig,
+    *,
+    strict_threshold: bool = False,
 ) -> BinaryMetrics:
     device = resolve_device(config.training.device)
     model.to(device).eval()
     criterion = nn.CrossEntropyLoss()
     labels = []
     probabilities = []
+    group_ids = []
+    has_group_ids = True
     loss_sum = 0.0
     samples = 0
     precision = config.training.mixed_precision
@@ -64,10 +68,16 @@ def evaluate_model(
             torch.softmax(output.logits, dim=1)[:, 1].float().cpu().numpy()
         )
         labels.append(batch_labels.cpu().numpy())
+        if batch.get("group_ids") is None:
+            has_group_ids = False
+        else:
+            group_ids.append(batch["group_ids"].cpu().numpy())
 
     return compute_binary_metrics(
         np.concatenate(labels),
         np.concatenate(probabilities),
         loss=loss_sum / samples,
         threshold=config.training.threshold,
+        strict_threshold=strict_threshold,
+        group_ids=np.concatenate(group_ids) if has_group_ids else None,
     )

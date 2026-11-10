@@ -1,0 +1,15 @@
+# Separate experiment: all overrides are recorded alongside the base config.
+base_config: plm_stage8_20260920_best_joint.yaml
+warmup_checkpoint: ../trained_model/PLM_Stage8/fold_1/seed_42/warmup/stage8a_best_pht_20260921_111731_349210.pt
+pt_teacher_checkpoint: ../trained_model/PLM_Unified_PH_PT/fold_1/seed_42/best_ptcr_20260920_151134_400917.pt
+output_root: ../trained_model/PLM_Stage8_PTRetention
+policy:
+  rounds: 10
+  ph_replay_ratio: 0.25
+  pt_replay_ratio: 1.0
+  distillation_weight: 0.5
+  temperature: 2.0
+  label_smoothing: 0.03
+  macro_tolerance: 0.01
+  split_tolerance: 0.02
+  pht_tolerance: 0.02

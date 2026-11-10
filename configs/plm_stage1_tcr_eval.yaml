@@ -12,9 +12,9 @@ model:
   hla_input_dim: 960
   tcr_input_dim: 768
   adapter_hidden_dim: 256
-  model_dim: 128
-  num_attention_heads: 4
-  feedforward_dim: 512
+  model_dim: 256
+  num_attention_heads: 8
+  feedforward_dim: 1024
   adapter_dropout: 0.1
   attention_dropout: 0.1
   classifier_dropout: 0.2
@@ -39,9 +39,9 @@ training:
   online_batch_size: 32
   num_workers: 2
   warmup_epochs_per_task: 2
-  max_rounds: 10
-  early_stopping_patience: 3
-  early_stopping_min_delta: 0.0001
+  max_rounds: 100
+  early_stopping_patience: 20
+  early_stopping_min_delta: 0.001
   adapter_lr: 0.0003
   cross_attention_lr: 0.0002
   pooling_lr: 0.0003
@@ -50,6 +50,11 @@ training:
   scheduler_warmup_ratio: 0.05
   gradient_clip_norm: 1.0
   fgm_epsilon: 1.0
+  phla_adversarial_loss_weight: 0.25
+  ptcr_adversarial_loss_weight: 0.25
+  selection_calibration_guard_enabled: true
+  selection_nll_tolerance: 0.05
+  selection_ece_tolerance: 0.02
   threshold: 0.5
   mixed_precision: bf16
   log_every_steps: 50

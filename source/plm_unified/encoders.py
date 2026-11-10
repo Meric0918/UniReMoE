@@ -136,7 +136,8 @@ class ESMCResidueEncoder(FrozenResidueEncoder):
     ):
         super().__init__(checkpoint_path, max_length)
         try:
-            from transformers import AutoModelForMaskedLM, AutoTokenizer
+            from safetensors.torch import load_file as load_safetensors
+            from transformers import AutoConfig, AutoModelForMaskedLM, AutoTokenizer
         except ImportError as exc:
             raise RuntimeError(
                 "transformers>=4.57.6 is required for the ESM-C checkpoint"
@@ -148,11 +149,32 @@ class ESMCResidueEncoder(FrozenResidueEncoder):
             self.checkpoint_path,
             local_files_only=True,
         )
-        self.model = AutoModelForMaskedLM.from_pretrained(
+        model_config = AutoConfig.from_pretrained(
             self.checkpoint_path,
             local_files_only=True,
-            dtype=load_dtype,
-        ).to(device)
+        )
+        self.model = AutoModelForMaskedLM.from_config(model_config)
+        weights_path = self.checkpoint_path / "model.safetensors"
+        if not weights_path.is_file():
+            raise FileNotFoundError(f"ESM-C weights not found: {weights_path}")
+        state_dict = load_safetensors(weights_path, device="cpu")
+        # Transformer Engine stores empty runtime metadata as _extra_state.
+        # Transformers' meta loader treats those BytesIO values as tensors,
+        # so load the learned tensors directly and let TE recreate metadata.
+        state_dict = {
+            key: value
+            for key, value in state_dict.items()
+            if not key.endswith("._extra_state")
+        }
+        missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+        missing = [key for key in missing if not key.endswith("._extra_state")]
+        if missing or unexpected:
+            raise RuntimeError(
+                "ESM-C state_dict does not match its config: "
+                f"missing={missing}, unexpected={unexpected}"
+            )
+        del state_dict
+        self.model.to(device=device, dtype=load_dtype)
         self.model.requires_grad_(False)
         self.model.eval()
         hidden_size = getattr(self.model.config, "d_model", None)
@@ -290,7 +312,11 @@ class OnlineEncoderBundle:
         tcr_max_length: int,
         device: torch.device,
         dtype: str,
+        tasks: Sequence[str] = ("phla", "ptcr"),
     ):
+        self.tasks = tuple(tasks)
+        if not self.tasks or any(task not in {"phla", "ptcr"} for task in self.tasks):
+            raise ValueError("Online encoders require phla and/or ptcr")
         self.peptide_max_length = peptide_max_length
         self.hla_max_length = hla_max_length
         self.esmc = ESMCResidueEncoder(
@@ -304,7 +330,7 @@ class OnlineEncoderBundle:
             max_length=tcr_max_length,
             device=device,
             dtype=dtype,
-        )
+        ) if "ptcr" in self.tasks else None
 
     def encode(
         self,
@@ -312,6 +338,8 @@ class OnlineEncoderBundle:
         peptide_sequences: Sequence[str],
         receptor_sequences: Sequence[str],
     ) -> dict[str, torch.Tensor]:
+        if task not in self.tasks:
+            raise ValueError(f"Task is not enabled: {task}")
         self.esmc.max_length = self.peptide_max_length
         peptide = self.esmc.encode(peptide_sequences)
         if task == "phla":
@@ -329,11 +357,13 @@ class OnlineEncoderBundle:
         }
 
     def metadata(self) -> dict[str, Any]:
-        return {
+        metadata = {
             "mode": "online_debug",
             "esmc": encoder_metadata(self.esmc),
-            "tcr_bert": encoder_metadata(self.tcr_bert),
         }
+        if self.tcr_bert is not None:
+            metadata["tcr_bert"] = encoder_metadata(self.tcr_bert)
+        return metadata
 
 
 def _normalise_sequence(sequence: str) -> str:

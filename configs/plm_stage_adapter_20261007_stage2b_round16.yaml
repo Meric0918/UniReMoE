@@ -1,0 +1,64 @@
+paths:
+  project_root: ..
+  data_root: ../dataset
+  output_root: ../trained_model/PLM_StageAdapter
+  swanlog_root: ../swanlog/PLM_StageAdapter
+  esmc_model: /home/mjp/model/ESMC-300M
+  tcr_bert_model: /home/mjp/model/TCR-Bert
+  # Legacy StageAdapter source fields point to the full Stage2B joint checkpoint.
+  stage1_checkpoint: ../trained_model/PLM_Unified/fold_1/seed_3407/stage2b_best_joint_20260928_112359_821461.pt
+  stage1_sha256: aef696c9a3b6fb43f445f6ec444abab43f1254b8a00b2af5e8704294863d0e29
+
+model:
+  peptide_input_dim: 960
+  hla_input_dim: 960
+  tcr_input_dim: 768
+  adapter_hidden_dim: 256
+  model_dim: 256
+  num_attention_heads: 8
+  feedforward_dim: 1024
+  adapter_dropout: 0.15
+  attention_dropout: 0.15
+  classifier_dropout: 0.25
+  peptide_min_length: 8
+  peptide_max_length: 15
+  hla_max_length: 34
+  tcr_max_length: 34
+
+runtime:
+  fold: 1
+  seed: 3407
+  device: cuda
+  num_workers: 2
+
+stage_adapter:
+  data_subdir: PHT/classes
+  class_dirs: [PHT_000, PHT_010, PHT_100, PHT_111]
+  train_filename: train.csv
+  val_filename: val.csv
+  reject_noncanonical_sequences: true
+  residual_adapter_dim: 64
+  stage_adapter_a_epochs: 2
+  micro_batch_size: 4
+  eval_batch_size: 32
+  gradient_accumulation_steps: 16
+  min_rounds: 5
+  max_rounds: 100
+  early_stopping_patience: 20
+  early_stopping_min_delta: 0.0001
+  adapter_lr: 0.000025
+  pht_module_lr: 0.0001
+  weight_decay: 0.01
+  scheduler_warmup_ratio: 0.05
+  gradient_clip_norm: 1.0
+  mixed_precision: bf16
+  gradient_checkpointing: true
+  log_every_steps: 50
+
+swanlab:
+  project: unifyimmun
+  workspace: null
+  mode: online
+  group: plm-stage-adapter-fold{fold}
+  experiment_prefix: PLM-Stage-Adapter-Stage2B-R16
+  tags: [ESMC-300M, TCR-BERT, stage-adapter, frozen-stage2b-joint, PHT-only, best-joint-round16]

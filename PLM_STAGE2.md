@@ -5,22 +5,23 @@
 
 ## 1. 已确认的训练策略
 
-阶段 2 必须从同一 fold/seed 已完成训练的
-`last_<YYYYMMDD_HHMMSS_ffffff>.pt` 初始化。不能使用或合并
-`best_phla`/`best_ptcr`，因为两个文件可能包含不同训练时刻的共享 Peptide
-Adapter。
+阶段 2 默认从同一 fold/seed 已完成训练的
+`last_<YYYYMMDD_HHMMSS_ffffff>.pt` 初始化。也可以使用 `--from-scratch` 从随机
+初始化的 Stage 1 下游模块开始训练；该模式仍会加载配置指定的预训练 ESM-C/TCR-BERT
+基础权重。不能使用或合并 `best_phla`/`best_ptcr`，因为两个文件可能包含不同训练
+时刻的共享 Peptide Adapter。
 
 阶段 2A：
 
-- Peptide ESM-C 解冻最后 2 个 Transformer blocks；
-- HLA ESM-C、TCR-BERT 完全冻结；
+- Peptide ESM-C、HLA ESM-C、TCR-BERT 均完全冻结；
+- 只训练 Stage 1 已有的下游 Adapter、Cross-attention、Pooling 和 Classifier；
 - 固定训练 2 个 pHLA → pTCR alternating rounds；
 - 两轮完成后回载 `joint_score` 最佳的阶段 2A checkpoint，再进入 2B。
 
 阶段 2B：
 
 - Peptide ESM-C 解冻最后 2 层；
-- HLA ESM-C 解冻最后 1 层；
+- HLA ESM-C 解冻最后 2 层；
 - TCR-BERT 解冻最后 2 层；
 - 至少训练 5 轮，最多 20 轮；
 - 连续 5 轮 `joint_score` 未提升后早停。
@@ -43,15 +44,17 @@ joint_score = (
 
 | 参数组 | 学习率 |
 |---|---:|
-| Peptide ESM-C 最后一层 | `1e-5` |
-| Peptide ESM-C 倒数第二层 | `5e-6` |
+| Peptide ESM-C 最后一层（仅 2B） | `1e-5` |
+| Peptide ESM-C 倒数第二层（仅 2B） | `5e-6` |
 | HLA ESM-C 最后一层（仅 2B） | `1e-5` |
+| HLA ESM-C 倒数第二层（仅 2B） | `5e-6` |
 | TCR-BERT 最后一层（仅 2B） | `1e-5` |
 | TCR-BERT 倒数第二层（仅 2B） | `5e-6` |
-| 三个 Adapter | `5e-5` |
-| Cross-attention | `1e-4` |
-| Pooling | `1e-4` |
-| Classifier | `1e-4` |
+| 共享 Peptide Adapter | `5e-5` |
+| HLA/TCR Adapter | `1e-4` |
+| pHLA/pTCR Cross-attention | `1e-4` / `7.5e-5` |
+| pHLA/pTCR Pooling | `1e-4` / `1e-4` |
+| pHLA/pTCR Classifier | `7.5e-5` / `7.5e-5` |
 
 上述值是各参数组的基准/峰值学习率。2A 和 2B 各自创建 optimizer 与
 scheduler：前 5% optimizer steps 线性 warm-up，随后 cosine decay。进入
@@ -66,10 +69,14 @@ scheduler：前 5% optimizer steps 线性 warm-up，随后 cosine decay。进入
 - ESM-C 顶层手动 activation checkpointing；
 - TCR-BERT 原生 gradient checkpointing。
 
-阶段 2A 的 HLA ESM-C 完全冻结，且 pHLA 数据会高度重复使用少量 HLA
+阶段 2A 的三个 encoder 均完全冻结，且 pHLA 数据会高度重复使用少量 HLA
 pseudo-sequence。因此训练器会在 GPU 上按序列惰性缓存 HLA residue embedding：
-每条不同 HLA 只经过一次冻结 ESM-C；进入阶段 2B、HLA 顶层解冻前自动清空缓存。
-Peptide 和阶段 2B 中已解冻的 HLA/TCR 不会缓存，梯度和训练目标保持不变。
+每条不同 HLA 只经过一次冻结 ESM-C；进入阶段 2B、三个 encoder 顶层解冻前自动清空缓存。
+阶段 2B 不使用冻结 embedding cache，保证三个 encoder 顶层都能参与反向传播。
+
+Stage 2 的监督损失与当前 Stage 1 保持一致：pHLA/pTCR 分别使用 `0.01`/`0.015`
+label smoothing，实体-label 使用裁剪到 `[0.5, 2.0]` 的 inverse-sqrt 分组权重；
+验证仍使用未平滑、未加权的 NLL。Stage 2 的 FGM 继续关闭，`task_step_ratio` 不启用。
 
 ## 3. 实时训练日志
 
@@ -169,6 +176,31 @@ python source/train_plm_stage2.py \
   --seed 42 \
   --device cuda \
   --swanlab-mode online
+```
+
+不加载 Stage 1 下游 checkpoint、从头训练 Stage 2 下游模块：
+
+```bash
+python source/train_plm_stage2.py \
+  --config configs/plm_stage2.yaml \
+  --from-scratch \
+  --fold 1 \
+  --seed 42 \
+  --device cuda \
+  --swanlab-mode online
+```
+
+`--from-scratch` 与 `--stage1-checkpoint`、`--resume` 互斥。Stage 2A 会在该模式下
+使用随机初始化的 Adapter/Cross-attention/Pooling/Classifier，Stage 2B 再解冻三个
+encoder 的最后 2 层。
+
+批量从头训练时可指定 fold/seed；若目标目录尚不存在，脚本会自动创建：
+
+```bash
+./run_plm_stage2_all.sh \
+  --from-scratch \
+  --folds 1,2,3,4,5 \
+  --seeds 42,2026,3407
 ```
 
 少量数据调试：

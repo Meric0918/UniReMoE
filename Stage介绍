@@ -8,6 +8,10 @@ Stage7：验证 PHT 是否真正使用 HLA 条件信息
 Stage8：与 Stage3 同层、同从 Stage1 初始化；四类型 PHT joint 训练，并新增 PH/PHT hierarchy 与 PT/PHT implication 约束
 Stage9：在 Stage3 基础上对三种 embedding 做 CLIP 对比学习
 Stage10：保留 Stage3 作为教师，使用 KL 约束缓解 Stage8 的 PT 遗忘
+Stage12：在Stage8的基础上加强PH和PT的表现
+Stage13：GraphSAGE 融合的 Stage1 双任务模型
+Stage14：PHT 三元任务（Stage8） + Hyper-PMT 异构超图融合
+Stage15：PH/PT 二元任务（Stage1） + Hyper-PMT 异构超图融合
 
 ```text
 Stage 1 best_joint

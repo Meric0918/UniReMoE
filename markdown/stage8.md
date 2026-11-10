@@ -26,4 +26,6 @@ Stage 8 V2 保存完整 online model：`stage8a_best_pht_TIMESTAMP.pt`、`stage8
 ./run_stage8.sh ablations --stage1-checkpoint /path/to/best_joint_20260824_174202_510837.pt
 ```
 
+`ablations` 默认并行启动四个 Stage 8B 条件；每个条件独立写 checkpoint 和 SwanLab run。每个完成的 round 都会记录训练指标、验证指标、joint score、约束分量与违反率。已有 warmup/ baseline last 时，可用 `--warmup-checkpoint ... --resume-baseline ...` 跳过 warmup 并恢复 baseline；资源受限时用 `--sequential` 串行执行。
+
 Stage 10 仍使用 `stage8_data.py` 中保留的通用 cache helper 和 cached Stage 8 binding evaluator；移除的仅是 Stage 8 自己的 precompute/export 公共入口。
