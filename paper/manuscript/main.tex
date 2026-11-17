@@ -1,0 +1,2422 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% UniReMoE manuscript -- OUP authoring template (Bioinformatics-style)
+%% Build: ./build.sh (Tectonic or TeX Live); see README.md.
+%%
+%% PLACEHOLDER POLICY
+%%   \NA{}   -- a result cell whose numerical evidence has not yet been inserted
+%%   \TODO{} -- prose, citation or metadata the authors must supply
+%%   \figph  -- a framed box standing in for a figure that is not drawn yet
+%% All three helpers must be deleted before submission.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\documentclass[webpdf,modern,large,namedate]{oup-authoring-template}
+
+\graphicspath{{Fig/}}
+
+% OUP's print page-box hook emits PostScript pdfmark commands. XeTeX/Tectonic
+% uses xdvipdfmx; use its paper-size special for this web-PDF manuscript.
+\ifdefined\XeTeXversion
+  \makeatletter
+  \def\shipout@PageObjects{%
+    \special{papersize=\the\paperwidth,\the\paperheight}}
+  \let\rest@dvi@pages\shipout@PageObjects
+  \makeatother
+\fi
+
+% The class uses \societylogo{} in the page header but never defines it.
+\newcommand{\societylogo}{}
+
+% Theorem-like environments: the class supplies the styles, not the environments.
+\theoremstyle{thmstyleone}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+\theoremstyle{thmstyletwo}
+\newtheorem{example}{Example}
+\newtheorem{remark}{Remark}
+\theoremstyle{thmstylethree}
+\newtheorem{definition}{Definition}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Placeholder helpers -- DELETE BEFORE SUBMISSION
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\DeclareRobustCommand{\figph}[3][\linewidth]{%
+  \fbox{\parbox[c][#2][c]{\dimexpr #1-2\fboxsep-2\fboxrule\relax}{%
+    \centering\small\textit{#3}}}}
+\newcommand{\NA}{N/A}
+%% Robust, because \TODO appears inside captions that are written to the .lof.
+\DeclareRobustCommand{\TODO}[1]{\textcolor{red}{[TODO: #1]}}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% Stable notation. Terminology must not drift between sections.
+%% \PH/\PT/\PHT are the PROSE forms and must stay plain expandable text: they
+%% appear in \title[...] (which feeds \markboth) and in \subsection{...}, where
+%% a \text-based definition would upset hyperref's PDF-string handling.
+%% Use the upright \PHm/\PTm/\PHTm forms inside math mode instead -- the prose
+%% forms would set as italic multi-letter variables, and \PHT's en dash would
+%% become two binary minus signs in a subscript.
+\newcommand{\method}{UniReMoE}
+\newcommand{\PH}{pHLA}
+\newcommand{\PT}{pTCR}
+\newcommand{\PHT}{pHLA--TCR}
+\newcommand{\PHm}{\mathrm{PH}}
+\newcommand{\PTm}{\mathrm{PT}}
+\newcommand{\PHTm}{\mathrm{PHT}}
+\newcommand{\sg}{\mathrm{sg}}
+\newcommand{\LN}{\mathrm{LN}}
+\newcommand{\MHA}{\mathrm{MHA}}
+\newcommand{\relu}{\mathrm{relu}}
+\newcommand{\softmax}{\mathrm{softmax}}
+\newcommand{\dmodel}{d}
+
+\begin{document}
+
+\journaltitle{Bioinformatics}
+\DOI{DOI added during production}
+\copyrightyear{2026}
+\pubyear{2026}
+\vol{XX}
+\volume{XX}   % \vol feeds the running heads, \volume the first-page opener box
+\issue{X}
+\access{Published: Date added during production}
+\appnotes{Original Paper}
+
+\firstpage{1}
+
+\subtitle{Sequence analysis}
+
+%% Keep the optional short title. The class's no-argument \title{...} branch
+%% calls \authormark, which the class never defines, so it errors out.
+\title[Shared--private interaction experts for \PHT{} prediction]{%
+\method{}: shared--private relation experts and label-aware consistency for
+unified peptide--HLA--TCR binding prediction}
+
+\author[1,$\ast$]{Junpeng Ma\ORCID{0000-0000-0000-0000}}
+\author[1]{\TODO{co-author name}}
+\author[2]{\TODO{co-author name}}
+
+\address[1]{\orgdiv{\TODO{division}}, \orgname{\TODO{institution}},
+\orgaddress{\street{\TODO{street}}, \postcode{\TODO{postcode}},
+\state{\TODO{state}}, \country{\TODO{country}}}}
+\address[2]{\orgdiv{\TODO{division}}, \orgname{\TODO{institution}},
+\orgaddress{\street{\TODO{street}}, \postcode{\TODO{postcode}},
+\state{\TODO{state}}, \country{\TODO{country}}}}
+
+\corresp[$\ast$]{Corresponding author.
+\href{mailto:corresponding@example.org}{corresponding@example.org}}
+
+\received{Date}{0}{Year}
+\revised{Date}{0}{Year}
+\accepted{Date}{0}{Year}
+
+\abstract{
+\textbf{Motivation:} Peptide--HLA (\PH{}), peptide--TCR (\PT{}) and
+peptide--HLA--TCR (\PHT{}) prediction ask related questions with different
+inputs. Positive pair labels do not establish recognition in every HLA
+context, although the absence of class \texttt{110} (both pairs positive,
+triple negative) makes conjunction sufficient to reproduce the observed labels.
+An explicit triple head avoids building this dataset-specific regularity into
+the prediction rule: it can use the joint molecular context instead of being
+restricted to a fixed combination of pair scores. Learning exceptions to that
+regularity still requires discriminating supervision. The unified model must
+also share useful features without forcing identical task transformations.\\
+\textbf{Results:} We present \method{}, a sequence-based model with three
+jointly supervised prediction heads over frozen protein-language-model residue
+embeddings. The pair heads use only their respective inputs, while the triple
+head models recognition of the peptide under the specified HLA. To accommodate
+their different feature requirements, each interaction block uses a dense
+mixture of two globally shared and two branch-private experts. Relation-specific
+routers select a mixture per sample, and the experts operate at each peptide
+residue. This adapts an established multi-task topology to interactions with
+different input compositions and preserves their outputs for the triple branch.
+An HLA-conditioned per-residue gate transfers independently supervised \PT{}
+features into the triple branch and lets triple supervision flow back to the
+\PT{} feature extractor. Ablation experiments show that adding this gated
+connection improves both \PT{} and \PHT{} prediction. Because feature sharing
+does not directly regulate the three output scores, we add four label-aware
+directional penalties. They raise lagging pair scores on positive triples or
+lower excessive triple scores when the corresponding pair and triple labels
+are negative, without clipping all triple predictions to a hard pair-score bound.
+\TODO{Insert the transfer-ablation metrics, effect sizes and evaluation
+protocol; complete the other quantitative comparisons from their run records.}\\
+\textbf{Availability and implementation:} Source code, configurations, the
+data-split audit and trained models are available at \TODO{repository URL}.\\
+\textbf{Contact:}
+\href{mailto:corresponding@example.org}{corresponding@example.org}\\
+\textbf{Supplementary information:} Supplementary data are available at
+\textit{Bioinformatics} online.}
+
+\keywords{peptide--HLA binding, TCR specificity, protein language model,
+mixture of experts, multi-task learning, immunogenicity}
+\keywords[Abbreviations]{PLM, protein language model; MoE, mixture of experts;
+\PH{}, peptide--HLA; \PT{}, peptide--TCR; \PHT{}, peptide--HLA--TCR;
+AUROC, area under the receiver operating characteristic curve;
+AUPRC, area under the precision--recall curve;
+MCC, Matthews correlation coefficient}
+
+\maketitle
+
+% Keep the expanded key points out of the fixed-height opening page.
+\clearpage
+\section*{Key Points}
+\begin{itemize}
+\item One sequence-based model serves \PH{}, \PT{} and \PHT{} with explicit
+input boundaries. A separately supervised triple head avoids fixing its
+decision to pairwise conjunction; verified \texttt{110} examples are needed
+to test whether it learns the additional HLA-dependent distinction.
+\item Shared and branch-private experts let each relation select how much
+interaction capacity to reuse. Routing is sample-level, expert computation is
+residue-level, and the transformed pair representations remain available to
+the triple branch.
+\item HLA-conditioned gated transfer supplies independently supervised \PT{}
+features to \PHT{} and returns triple-task gradients to the \PT{} feature
+extractor. Adding this connection improves both tasks in the ablation study.
+\item Label-aware consistency addresses output-score disagreement left open
+by representation sharing and transfer. It selects a label-supported correction
+direction and applies a soft penalty, retaining separate predictions rather
+than enforcing a hard probability hierarchy.
+\end{itemize}
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Introduction}\label{sec:intro}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+T cells recognise peptides displayed by human leukocyte antigen (HLA)
+molecules on the cell surface. Two questions therefore precede a prediction
+for a particular peptide--HLA--TCR combination: can this HLA bind the peptide,
+and is the T-cell receptor (TCR) associated with recognition of that peptide?
+The final question is more specific: can this TCR recognise the peptide as
+presented by this HLA? HLA holds the peptide in a binding groove, while the TCR
+contacts the exposed peptide together with parts of the HLA molecule
+\citep{rudolph2006structural}. Changing the HLA can therefore change the
+surface available to the receptor. These interactions are relevant to
+neoantigen selection and TCR-based therapy, although binding alone does not
+guarantee a cellular immune response \citep{schumacher2015neoantigens,
+sahin2018personalized}.
+
+We denote the three prediction tasks by peptide--HLA (\PH{}), peptide--TCR
+(\PT{}) and peptide--HLA--TCR (\PHT{}). Established predictors address
+\PH{} binding or presentation \citep{reynisson2020netmhcpan,
+odonnell2020mhcflurry}, or score peptide--TCR compatibility without an explicit
+HLA input \citep{springer2020ergo, weber2021titan}. The latter
+input convention does not mean that a TCR recognises a free peptide in
+isolation; it means that the presenting HLA is unspecified in that prediction.
+A positive \PH{} pair and a positive \PT{} pair therefore need not establish
+recognition of the specified triple. For example, a receptor associated with a
+peptide in one HLA context need not recognise it under another HLA that can
+also bind that peptide. Combining two predicted pair scores by a minimum or
+product supplies a useful baseline, but does not explicitly model this
+allele-conditioned recognition. A minimum is a heuristic; a product requires
+additional factorisation assumptions to be interpreted as a joint probability.
+
+The label coverage makes this distinction especially important. Write the
+three binary labels in the order \PH{}, \PT{}, \PHT{}. Our corpus contains
+\texttt{000}, \texttt{100}, \texttt{010} and \texttt{111}, but no
+\texttt{110}: both pairs positive while the specified triple is negative.
+Consequently, on every available fully labelled row,
+$y_{\PHTm}=y_{\PHm}\land y_{\PTm}$. A rule that predicts a positive triple
+whenever both pair labels are positive thus reproduces the observed triple
+labels exactly. The \texttt{111} examples establish co-occurrence, not the
+universal implication that two positive pairs are sufficient. This restricted
+label distribution leaves a conjunction-based solution unchallenged. If a
+system contains only pair heads and defines its triple decision by conjunction,
+it turns that empirical regularity into a fixed prediction rule, with no
+separate decision based on the specified HLA--peptide--TCR context.
+
+This motivates retaining \PHT{} as a separately supervised task. Its head
+operates on joint residue-level representations of all three entities, rather
+than treating the two pair scores as sufficient to determine the answer.
+The purpose is to avoid imposing pairwise sufficiency in the architecture and
+to allow recognition to depend on the particular HLA context. It is not to
+assume that adding a head automatically removes the training-data bias: an
+unconstrained triple head can still learn a conjunction-like rule when no
+counterexamples are available. Verified \texttt{110} examples are therefore
+needed to test whether this representational freedom is used to distinguish
+positive pairs from a positive specified triple. Section~\ref{sec:method:problem}
+separates this modelling rationale from its empirical validation.
+
+Unifying the three tasks is not itself new. UniPMT already jointly predicts
+peptide--MHC, peptide--TCR and peptide--MHC--TCR binding using a heterogeneous
+graph \citep{zhao2025unipmt}. Our first contribution is a different unified
+formulation: a sequence-based model with three supervised heads and explicit
+input boundaries, in which \PH{} uses $(p,h)$, \PT{} uses $(p,t)$ and
+\PHT{} uses $(p,h,t)$. UniPMT's \PT{} score is obtained by averaging its
+\PHT{} predictions over candidate MHC molecules. In contrast, our directly supervised \PT{} branch
+uses only the peptide and TCR sequences and supplies its unpooled residue
+features to an explicit \PHT{} branch. The triple head composes these with
+\PH{} features within the current sample, without a binding-relation graph.
+This is a distinction in representation and supervision design, not a claim to be the first unified
+predictor or a claim of superiority without comparison.
+
+The second contribution concerns how such a model can share capacity while
+accommodating competing task requirements. UnifyImmun shares a peptide encoder
+but uses separate cross-attention modules for \PH{} and \PT{}, trained with a
+two-phase progressive schedule \citep{yu2025unifyimmun}. Its described
+training objective has two pairwise heads, rather than an independently
+supervised triple head. Fusion-pMT instead pretrains a \PH{} model, passes its
+unpooled interaction representation into a TCR attention module, and finetunes
+the model on \PHT{} \citep{ma2025fusionpmt}. Neither design directly specifies
+how to balance all three objectives when they remain active together. Extending
+the former with a triple head exposes the shared encoder to three objectives
+but leaves interaction-level sharing unspecified. Extending the latter with
+simultaneous pair supervision makes the reused \PH{} representation serve
+both HLA binding and TCR recognition. These are potential sources of training
+interference, not reported failures of either published method.
+
+The tension is concrete. A \PH{} predictor needs features that work across
+TCRs because it never receives a TCR; a \PT{} predictor must work without a
+specified HLA; a \PHT{} predictor must distinguish the particular combination.
+A representation useful for a pair task can therefore omit information useful
+for the triple task. Full sharing can make those objectives compete for the
+same transformation, whereas completely separate interaction modules cannot
+reuse transformations learned from the other relations. We address this
+trade-off with two globally shared experts and two private experts in each
+relation branch, combined by a learned relation-specific gate. Shared experts
+provide reusable transformations; private experts provide alternatives for
+relation-specific requirements; and the gate adjusts the mixture to the
+sample. We adopt this topology from multi-task learning \citep{tang2020ple}
+and adapt it to the peptide residue axis, so that branches with different
+inputs can use the same expert pool and retain their outputs for subsequent
+triple interaction. This provides a mechanism for selective sharing, not a
+guarantee that all gradient conflicts disappear.
+
+Our transfer contribution starts from Fusion-pMT's use of a \PH{}
+representation learned under pairwise supervision as input to the triple
+interaction \citep{ma2025fusionpmt}. This captures the presentation side of
+recognition, but a triple decision depends on both peptide--HLA binding and
+TCR recognition of the presented complex. Fusion-pMT learns the latter from
+the triple objective; it does not additionally transfer interaction features
+learned by an independently supervised \PT{} task. We add that complementary
+path. An HLA-conditioned gate injects the unpooled \PT{} representation at
+each peptide position, so the triple branch receives both presentation
+features and independently learned recognition features, with their use
+adjusted to the current HLA context.
+
+The connection also benefits the source task through training. Because the
+transfer is differentiable, the \PHT{} classification loss propagates back
+to the \PT{} interaction representation, making it useful for both pairwise
+association and recognition in a specified HLA context. This feedback updates
+the \PT{} feature extractor, not its separate classification head through the
+transfer path, and \PT{} inference still requires only peptide and TCR inputs.
+Thus the mechanism combines \PT{}$\rightarrow$\PHT{} forward feature transfer
+with \PHT{}$\rightarrow$\PT{} backward supervision. Our ablation experiments
+show improved prediction for both tasks when the gated connection is added;
+isolating the contribution of backward feedback requires the gradient-blocking
+control in Section~\ref{sec:results:ablation}.
+
+Finally, sharing and transferring features do not specify how the resulting
+scores should relate. Separate binary losses train each head against its own
+label, but never directly measure a gap between a pair score and the triple
+score for the same sample. A positive triple can consequently receive a high
+score while an associated positive pair remains under-confident. Simply
+bounding the triple score by both pair scores can pass that pairwise error
+into the triple decision. Moreover, the heads have different conditioning
+inputs, so the label implication on annotated triples does not automatically
+justify a pointwise ordering of their predicted probabilities.
+
+We therefore introduce label-aware directional consistency at the output
+level. On a positive triple, the penalty raises a lagging positive pair score
+using the triple score as a detached reference. When both a pair and the
+triple are labelled negative, it instead lowers an excessive triple score
+using the pair score as the reference. Each direct correction agrees with
+the updated output's binary label; a tolerance margin and finite loss weight
+make the coupling a soft training preference rather than an inference-time
+constraint. MoE allocates interaction capacity, gated transfer exchanges
+features and their supervision, and consistency regulates score relationships.
+Together these designs form \method{}
+(Figures~\ref{fig:teaser} and~\ref{fig:arch}).
+
+\TODO{Complete the experiment summary with the confirmed transfer-ablation
+metrics, splits and seed information; add other findings only when supported
+by the corresponding results in Section~\ref{sec:results}.}
+
+Our contributions are as follows.
+\begin{enumerate}[1.]
+\item \textbf{Unified sequence-based prediction of three relations.} We
+jointly supervise \PH{}, \PT{} and \PHT{} heads with their respective input
+pairs or triple, and preserve a separate HLA-conditioned triple decision.
+Unlike UniPMT's graph-based unification and MHC-averaged \PT{} score, our
+\PT{} branch is evaluated directly from its two sequences and its unpooled
+features enter the triple head. The separate triple decision avoids imposing
+pairwise sufficiency as an architectural constraint and can express
+HLA-dependent outcomes beyond conjunction. Whether that capability is learned
+remains to be tested with the currently missing \texttt{110} supervision.
+\item \textbf{Relation-aware expert sharing for joint pair and triple
+learning.} We place an established shared--private MoE topology inside each
+interaction block, with sample-level routing over residue-level experts.
+Relation-conditioned gates let branches with different input compositions
+choose reusable and branch-specific transformations, and the transformed pair
+representations continue into the triple branch. This design targets training
+interference while retaining transfer; its value is to be evaluated against matched
+sharing and placement controls.
+\item \textbf{HLA-conditioned gated transfer with reciprocal supervision.}
+Fusion-pMT transfers independently learned \PH{} features into \PHT{}; we
+add independently supervised \PT{} interaction features as complementary
+recognition evidence. For \PHT{}, a per-residue gate adapts these features to
+the specified HLA and triple state. For \PT{}, the differentiable connection
+returns triple-loss gradients to its feature extractor while preserving its
+pairwise input boundary. Forward transfer and backward feedback jointly train
+the reused representation; ablation experiments show that the connection
+improves both \PT{} and \PHT{} prediction.
+\item \textbf{Label-aware directional consistency of the output scores.}
+To address score disagreement not explicitly controlled by MoE or feature
+transfer, four label-conditioned penalties select both the applicable
+pair--triple relation and the direction of correction. Positive triples guide
+lagging pair scores upward; negative pairs guide excessive negative-triple
+scores downward. Stop-gradient holds the reference operand fixed for that
+penalty, while a margin and finite weight retain flexibility. Unlike a hard
+probability hierarchy, this objective neither caps every triple prediction by
+the pair scores nor enforces a universal ordering between differently
+conditioned heads.
+\item \TODO{Complete the empirical contribution with numerical evidence for
+the confirmed PT/PHT transfer gains and the remaining evaluated settings.}
+\end{enumerate}
+
+\begin{figure}[!t]
+\centering
+\figph{5.2cm}{Figure~1 placeholder (teaser). Compare task coverage and
+information flow: UnifyImmun uses two pairwise branches over a shared peptide
+encoder; Fusion-pMT transfers an unpooled PH representation into PHT after
+pair pretraining; UniPMT jointly predicts three relations through a graph.
+UniReMoE jointly supervises three sequence-based heads, shares interaction
+experts selectively and transfers unpooled PT features under an HLA-conditioned
+gate. Mark missing class 110 as an evaluation gap.}
+\caption{Task unification and selective sharing address distinct questions:
+which relations are predicted, and how their interaction representations are
+shared. The proposed model retains a separate triple head and combines shared
+and branch-private experts with residue-level transfer.}
+\label{fig:teaser}
+\figalttext[Task coverage and information flow across the compared models]{\TODO{alt text for the completed teaser figure}}%
+\end{figure}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Related work}\label{sec:related}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\subsection{Peptide--HLA presentation prediction}\label{sec:related:ph}
+
+Presentation prediction is mature and sets the accuracy expectation for the
+\PH{} task. Allele-conditioned neural predictors trained on pooled binding
+affinity and mass-spectrometry eluted-ligand data generalise across thousands
+of alleles by encoding the allele as a pseudo-sequence rather than as a
+categorical label \citep{reynisson2020netmhcpan, odonnell2020mhcflurry}, and
+transformer variants have since improved peptide-length handling and
+pan-allele transfer \citep{chu2022transphla}. We adopt the same
+pseudo-sequence view of the allele, and we treat this literature as the
+reference point for the \PH{} column of our tables rather than as a component
+to be improved.
+
+\subsection{Peptide--TCR recognition prediction}\label{sec:related:pt}
+
+Recognition prediction is the data-limited half of the problem, and this
+scarcity is what motivates sharing across tasks. Methods differ mainly in how
+they encode the CDR3 and how they score compatibility: distance- and
+clustering-based approaches group TCRs by sequence similarity to a known
+binder \citep{glanville2017identifying, dash2017quantifiable}, while supervised
+models learn a joint peptide--CDR3 scoring function with recurrent, attention or
+transfer-learning encoders \citep{springer2020ergo, weber2021titan}. Reported accuracy drops sharply for peptides and TCRs unseen
+in training, which is why we evaluate every task under explicit unseen-entity
+splits rather than on random partitions.
+
+\subsection{Unified models over both binding events}\label{sec:related:unified}
+
+UniPMT is the closest precedent in task coverage: it jointly learns \PH{},
+\PT{} and \PHT{} prediction with a heterogeneous graph
+\citep{zhao2025unipmt}. GraphSAGE produces entity representations; a dedicated
+\PHT{} predictor combines peptide--MHC and MHC--TCR interaction vectors, and
+its training includes triple supervision. The \PT{} score is the arithmetic
+mean of \PHT{} scores over candidate MHC molecules (their Eq.~11), and the
+three objectives are jointly optimised (their Eq.~12). Thus neither three-task
+coverage nor a supervised triple predictor is new to our work. Our distinction
+is a direct sequence-based branch for each relation: \PT{} requires no
+averaging over candidate HLA molecules and retains an independently supervised,
+unpooled peptide--TCR representation. That representation can then be used
+inside the HLA-conditioned triple interaction. This comparison concerns the
+computation and information flow; it does not imply that UniPMT cannot handle
+unseen entities, which it evaluates explicitly.
+
+UnifyImmun provides a complementary precedent for sharing across the pair
+tasks. It encodes the three entity types separately and uses two cross-attention
+branches over a shared peptide encoder, with a two-phase progressive training
+schedule \citep{yu2025unifyimmun}. Although the paper describes applications
+to HLA--peptide--TCR prediction, its specified architecture and loss train
+\PH{} and \PT{} heads, without a separately supervised triple head. Adding
+such a head would require deciding which interaction features to share and
+how to preserve pair-task performance under triple supervision. Our MoE
+addresses that allocation question. It is not justified by claiming that
+UnifyImmun shares one interaction transformation: its two interaction modules
+are separate. Nor are UniPMT's outputs independent, since its \PT{} score is
+derived from \PHT{} scores. Our label-aware directional objective is a
+specific additional coupling mechanism, not the first dependency between
+outputs in a unified model.
+
+\subsection{Hierarchical transfer from a pair task to the
+triple}\label{sec:related:transfer}
+
+Triple predictors already use the HLA context explicitly. For example,
+pMTnet accepts a peptide, an HLA allele and a TCR CDR3$\beta$ sequence to
+predict TCR recognition of a peptide--MHC complex \citep{lu2021pmtnet}.
+A related line transfers a trained \PH{} model into a triple predictor and
+provides the direct precedent for our representation-transfer design. Fusion-pMT pretrains on \PH{}, then discards the pooling and
+classification head and reuses the \emph{unpooled} peptide--HLA interaction
+matrix as the query of a second cross-attention module against the receptor,
+finetuning all parameters on the triple task \citep{ma2025fusionpmt}. The
+paper by \citet{niu2025attention} transfers its pretrained peptide--HLA encoder
+into a recognition model and adds a margin-based differential objective between
+a binding and a non-binding receptor for the same peptide--HLA complex. StriMap
+goes further on the molecular side: it pretrains a \PH{} predictor, then
+\emph{freezes} it and reuses it as a feature aggregator, mixing its pretrained
+representation with a task-specific one through an input-dependent gate on the
+HLA side and the peptide side separately, and models residue--residue
+interaction with bilinear attention over paired receptor $\alpha$/$\beta$
+chains and ESMFold-predicted structures \citep{cao2026strimap}.
+
+We adopt the central insight of this line --- that the unpooled pair
+representation, not a pooled score, is what the triple task should consume ---
+and we do not claim it. Our increments over it are three, and each is narrow.
+First, all three of these methods transfer in one direction only, from \PH{} to
+the triple, and none of them has an independently supervised peptide--TCR
+branch; we add one, so that the triple task receives recognition evidence that
+was itself trained against \PT{} labels rather than inferred from the triple
+objective alone. Second, Fusion-pMT and \citet{niu2025attention} replace the \PH{} training
+objective with triple training in a second stage, whereas StriMap freezes its
+\PH{} predictor. Fusion-pMT's reused parameters do receive triple gradients;
+what is absent is a continuing \PH{} objective that preserves pair-task
+performance during that adaptation. We keep all three objectives active and
+both transfer paths differentiable, so pair and triple supervision act on the
+reused modules together. In particular, the added \PT{} path supplies
+recognition features to \PHT{} and returns its classification gradients to
+the \PT{} extractor. Our ablation shows improvements in both tasks from adding
+the gated connection; this does not by itself isolate the roles of gating,
+forward reuse and backward feedback. Third, StriMap's gate mixes two representations \emph{of the same
+entity} --- a frozen pretrained one against a task-specific one --- whereas our
+gate controls how much of a \emph{different relation's} representation enters
+the triple path at each peptide residue.
+
+Two limits of that comparison must be stated plainly. StriMap consumes paired
+$\alpha$/$\beta$ chains and predicted three-dimensional structure, while we use
+a single CDR3$\beta$ loop and no structural input, so we cannot claim more
+complete modelling of the molecular interaction; our claim is confined to how
+supervision is used and how representations are transferred. And the
+differential objective of \citet{niu2025attention} compares two samples within
+one task, whereas our consistency terms compare three outputs of one sample
+across tasks; the two are complementary, and ours is not a substitute for
+learning from real triple negatives.
+
+Table~\ref{tab:positioning} summarises where each mechanism we build on comes
+from and what we change about it. We state the inherited mechanism first in
+every row, distinguishing task coverage from the mechanisms used to share
+representations and couple predictions.
+
+\begin{table*}[!t]
+\caption{Mechanisms this work builds on, the limitation of each as it stands in
+the cited work, and the specific change we make. Rows are grouped by which of
+our four methodological contributions they bear on. No row claims a mechanism as ours unless
+the final column says so.\label{tab:positioning}}
+\fontsize{7.5pt}{9pt}\selectfont
+\tabcolsep=0pt%
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}p{0.16\textwidth}p{0.27\textwidth}p{0.25\textwidth}p{0.27\textwidth}@{\extracolsep{\fill}}}
+\toprule
+Prior work & Mechanism we take from it & Limitation for our setting
+& What we change\\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Bearing on contribution 1: unified three-relation
+prediction}}\\
+UniPMT \citep{zhao2025unipmt}
+& Joint \PH{}, \PT{} and \PHT{} prediction using a heterogeneous graph.
+& The \PT{} score averages \PHT{} scores over candidate MHC molecules;
+there is no direct residue-level \PT{} branch to transfer.
+& Three direct sequence branches; independently supervised \PT{} residue
+features feed the HLA-conditioned triple branch.\\
+UnifyImmun \citep{yu2025unifyimmun}
+& A shared peptide encoder with separate \PH{} and \PT{} interaction heads.
+& Its specified training objective has no separately supervised triple head.
+& A jointly supervised \PHT{} head, with selective interaction sharing.\\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Bearing on contribution 2: shared--private
+interaction experts}}\\
+MMoE \citep{ma2018mmoe}
+& One shared expert pool with a per-task softmax gate; per-task gate
+distributions reported as a diagnostic.
+& No dedicated private path for relation-specific transformations;
+experts act on a pooled vector.
+& We keep the per-task gate and the diagnostic, and add private experts.\\
+CGC / PLE \citep{tang2020ple}
+& Shared expert module plus task-exclusive modules, fused by a dense per-task
+gate. \textbf{This is the topology we use.}
+& Posited as a general remedy for competing tasks; where its sample space is
+heterogeneous, the tasks still read one common input representation and differ
+only in label coverage; experts are MLPs on pooled vectors feeding a task
+tower; gate reads raw input features.
+& We adapt the decomposition to relations with unequal inputs: position-wise
+experts on the peptide axis, output continuing into the triple interaction,
+gate conditioned on a relation summary.\\
+NeoMUST \citep{ma2024neomust}
+& The same gate-control topology applied in immunopeptidomics, with
+uncertainty task weighting and conflict-averse gradients.
+& Both tasks are peptide--MHC over one input pair, so sharing across differing
+input scopes is untested; no triple relation.
+& Three relations with different inputs. We use no gradient surgery and claim
+no advantage in handling gradient conflict.\\
+MoE-TCR \citep{qu2026moetcr}
+& Expert mixtures for receptor--epitope prediction.
+& Experts are whole predictors under a sparse top-$k$ gate routed on the
+epitope; nothing is shared at the representation level.
+& Experts inside the interaction block, mixed densely, with a shared pool
+across relations.\\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Bearing on contribution 3: residue-level gated
+transfer}}\\
+Fusion-pMT \citep{ma2025fusionpmt}
+& The unpooled peptide--HLA interaction matrix, not a pooled score, is what
+the triple task should consume. \textbf{This insight is theirs.}
+& One-directional \PH{}$\rightarrow$\PHT{} transfer with no peptide--TCR
+branch; triple training replaces pair training in a second stage.
+& An HLA-gated \PT{} feature path supplies independently supervised recognition
+features to \PHT{} and returns triple gradients to the \PT{} extractor;
+pair and triple objectives remain active.\\
+\citet{niu2025attention}
+& Transfer of a pretrained peptide--HLA encoder into a recognition model.
+& Its differential objective compares two samples within one task, and it has
+no peptide--TCR branch.
+& Our coupling is across the three outputs of one sample; the two are
+complementary and we do not replace theirs.\\
+StriMap \citep{cao2026strimap}
+& Gated fusion of a pretrained pHLA representation with a task representation;
+residue-level interaction modelling.
+& The pHLA predictor is frozen, so information flows one way and the pair task
+cannot benefit from triple supervision.
+& Binary interaction modules stay trainable under triple gradients. Our gate
+mixes a \emph{different relation's} representation rather than two
+representations of the same entity.\\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Bearing on contribution 4: directional
+consistency}}\\
+HMCN \citep{wehrmann2018hmcn}
+& The squared-hinge violation penalty. \textbf{This form is theirs.}
+& Symmetric in gradient: both operands move when it fires, and the label never
+enters the penalty.
+& Labels select the reference; stop-gradient blocks its direct derivative in
+the penalty, so only the label-supported score receives a direct correction.\\
+C-HMCNN \citep{giunchiglia2020chmcnn}
+& Label-aware gradient routing: the label masks candidates inside a maximum.
+& Consistency is architectural, and the direction is fixed by a taxonomy edge,
+one direction per edge for every sample.
+& Soft penalty with no hard projection, stop-gradient instead of candidate
+masking, and a direction chosen per sample from the observed label pattern.\\
+\botrule
+\end{tabular*}
+\begin{tablenotes}%
+\item StriMap additionally uses paired receptor $\alpha$/$\beta$ chains and
+predicted structures, which we do not; we therefore make no claim of more
+complete molecular modelling.
+\end{tablenotes}
+\end{table*}
+
+\subsection{Protein language models as frozen feature
+extractors}\label{sec:related:plm}
+
+Protein language models supply the residue-level representations our
+interaction modules operate on, and keeping them frozen is a deliberate
+design choice. Masked-language-model pretraining on large sequence corpora
+yields per-residue embeddings that transfer to structure and function tasks
+\citep{rives2021esm, lin2023esmfold}, and repertoire-pretrained variants
+provide the same for TCR sequences \citep{wu2024tcrbert}. Fine-tuning them on
+immunopeptidomics-scale data is expensive and risks overfitting the scarce
+\PT{} labels, so a common alternative is to freeze the encoder and learn a
+small adapter on top \citep{houlsby2019parameterefficient}. We follow that
+route and go one step further by precomputing the residue embeddings once into
+a fixed-width cache, so the language models are absent from the training graph
+entirely.
+
+\subsection{Mixture-of-experts and multi-task
+fusion}\label{sec:related:moe}
+
+Mixture-of-experts layers and multi-task gating give us the vocabulary for our
+second contribution, but our use of them differs from both traditions in scale
+and in purpose. In language modelling, expert layers replace feed-forward
+sublayers and are made sparse with top-$k$ routing and capacity limits so that
+parameter count can grow without a matching increase in computation
+\citep{shazeer2017outrageously, fedus2022switch}. In multi-task learning,
+gated expert pools let tasks select different mixtures of a common expert set
+and so reduce interference between competing objectives. MMoE shares one
+expert pool across all tasks and gives each task its own softmax gate over it,
+with no task-private experts \citep{ma2018mmoe}. Customized Gate Control, the
+building block of PLE, adds exactly what MMoE lacks: a shared expert module
+whose parameters every task updates, plus a task-exclusive module per task,
+fused by a dense per-task gate, introduced to counter the ``seesaw
+phenomenon'' in which gains on one task come at another's expense
+\citep{tang2020ple}. \textbf{The sharing topology we use is theirs.} A pool of
+shared experts beside branch-private experts, mixed by a dense per-task softmax
+gate, is CGC's design, and the number of experts in each module is a tuned
+hyper-parameter in that scheme, so our two-plus-two configuration is a setting
+within it rather than a departure from it. Our question is a different one. CGC
+posits the shared/specific decomposition as a general remedy for competing
+tasks; we ask whether peptide binding across three relations actually has that
+structure, where to place the decomposition so relations
+with unequal input scopes can use it, and whether the resulting allocation can
+be measured and tested against matched sharing controls. Those are questions
+about this problem, not about the mechanism, and
+Section~\ref{sec:method:moe} answers them. What we change is the carrier of that
+topology and what the gate reads. In MMoE and CGC/PLE every task consumes the
+same input representation for a given sample, the experts are multilayer
+perceptrons over a flat pooled vector, and the mixture output goes to a task
+tower or to another extraction layer of the same kind; the gate is a linear
+function of that shared input, or in PLE's upper levels of the task's own
+previous fusion output. Our three branches instead read different entity
+compositions, so the shared experts are updated by branches that do not see the
+same inputs; the experts are position-wise and their output keeps the peptide
+residue axis, flowing into further interaction computation before any pooling;
+and the gate is conditioned on the current relation state and the available
+entity summaries, rather than only on raw input features.
+
+The first of those three needs one clarification, because PLE is also evaluated
+on tasks with a heterogeneous sample space, in which a user must click an
+impression before a share or a conversion can be observed
+\citep{tang2020ple}. That heterogeneity sits in the \emph{label} space and is
+nested: every task reads the same user--item features, and the tasks differ in
+which samples carry a label at all. Ours sits in the \emph{input} space and is
+not nested --- the \PH{} branch never receives a receptor and the \PT{} branch
+never receives an allele --- so a shared expert is updated by gradients
+computed from representations built over different entities, not from the same
+representation under different label coverage. Whether a shared expert pool
+stays useful under that condition does not follow from the recommendation
+results, and it is one of the things Section~\ref{sec:results:ablation} tests.
+We should be careful with the second of the three: placing a mixture in the feed-forward sublayer of an
+attention block is standard in the sparse-expert transformer line cited above,
+so what is particular here is its combination with a shared/private split and
+a relation-conditioned gate, not per-position experts as such. Our setting also
+takes the multi-task motivation and not the scaling one: the experts are small,
+the mixture is dense, and the purpose is to separate relation-general from
+relation-specific transformations rather than to add capacity cheaply.
+In our own domain the closest
+use of this machinery is NeoMUST, which places a customized gate control layer
+--- one shared expert and two task-exclusive experts --- over two peptide--MHC
+tasks, presentation classification and affinity regression, and adds
+uncertainty-based task weighting and conflict-averse gradient descent
+\citep{ma2024neomust}. Its two tasks nonetheless read the same input pair, so
+its machinery is never asked to share capacity between relations with
+\emph{different} input scopes, which is the harder case here; we also apply no
+gradient surgery, and therefore make no claim to handle gradient conflict
+better than it does.
+
+Taken together, these two lines locate what is open. Expert mixtures have been
+used in this domain at the level of whole predictors routed by epitope
+\citep{qu2026moetcr} and over two peptide--MHC objectives on a shared input
+pair \citep{ma2024neomust}, and the shared-plus-private topology itself is
+settled \citep{tang2020ple}. Our contribution is its adaptation to
+residue-level interactions that serve presentation, recognition and the triple
+relation together, despite their different input compositions. The claim
+concerns \emph{application and placement}, rather than a new expert topology. We also inherit the diagnostic rather than
+invent it: MMoE reports the softmax gate distribution of each task over the
+experts and reads off from it how the model balances shared against
+non-shared parameters, and PLE reports the mean and standard deviation of every
+gate's expert weights over the test data, concluding that its shared experts
+exert the larger influence \citep{ma2018mmoe, tang2020ple}. Inspecting per-task
+gate mass is therefore established practice. What we add is only its reduction
+to one reported scalar per branch, the shared fraction of
+Section~\ref{sec:method:moe}, tracked over training and across evaluation sets.
+
+Closest to our placement,
+expert layers have been applied to TCR specificity prediction
+\citep{qu2026moetcr}, but there the experts are whole pan-specific predictors
+selected by a sparse top-$k$ gate conditioned on the epitope. We instead place
+the mixture inside each binding-interaction block, on residue-resolved
+representations, combine all experts densely, and share part of the expert pool
+across relations.
+
+\subsection{Consistency and logical constraints in multi-task
+prediction}\label{sec:related:consistency}
+
+Our fourth contribution belongs to a line of work that injects known relations
+between outputs into the loss rather than into the architecture, and two
+hierarchical classifiers in that line are close enough that we must state the
+difference precisely. Constraint- and logic-based regularisers penalise output
+combinations that violate a stated rule by relaxing the rule into a
+differentiable surrogate \citep{xu2018semantic, hu2016harnessing}, and
+hierarchical classification enforces ordering between a label and its ancestors
+\citep{deng2014large}. HMCN supplies the functional form we use: a squared
+hinge $\lambda\max\{0, \hat y_{\mathrm{child}} - \hat y_{\mathrm{parent}}\}^2$
+penalising a child score that exceeds its parent's \citep{wehrmann2018hmcn}. We
+claim no credit for that form. Its penalty is, however, symmetric in gradient:
+when it fires, the child is pushed down and the parent pushed up by equal
+amounts, and the ground-truth label enters only through the classification
+losses, never through the penalty itself. C-HMCNN is closer still, because it
+does make the coupling label-aware: its loss multiplies predictions by their
+binary labels inside a maximum, so the label chooses which outputs are eligible
+to receive gradient and the maximum selects the recipient among them, while a
+max-constraint module enforces hierarchy consistency architecturally
+\citep{giunchiglia2020chmcnn}.
+
+Our rule differs from both on three specific points, and on nothing else.
+First, in form: we add soft squared hinges to the objective and enforce no hard
+constraint, where C-HMCNN's consistency is architectural and its label
+awareness sits inside a likelihood. Second, in the mechanism of gradient
+control: C-HMCNN masks a candidate set by multiplying by the label, whereas we
+apply an explicit stop-gradient to the operand the label designates as the
+reference, which keeps that operand in the forward value while freezing it as a
+target. Third, in the choice of correction target: for a given pair--triple
+relation, our observed label pattern selects whether the pair score is raised
+or the triple score is lowered, and when the coupling is inactive. This changes
+the gradient recipient, not the direction of a biological implication. Our
+contribution is this label-dependent application of soft directional coupling
+to the three relation heads, rather than a new hinge function or a new claim
+that labels can guide optimisation.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Materials and methods}\label{sec:method}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\subsection{Overview}\label{sec:method:overview}
+
+\method{} predicts the three binding relations with one network over frozen
+protein-language-model residue embeddings, and it is organised so that every
+representation keeps the peptide residue axis until the final pooling step.
+Figure~\ref{fig:arch} shows the architecture. Three trainable sequence encoders
+map cached residue embeddings of the peptide, the HLA pseudo-sequence and the
+CDR3$\beta$ loop into a common $\dmodel$-dimensional space
+(Section~\ref{sec:method:plm}). Three interaction blocks, one per relation,
+then let the peptide attend to its partner and pass the result through a gated
+mixture of shared and branch-private experts
+(Section~\ref{sec:method:moe}). The triple block additionally receives the
+unpooled \PT{} representation through a per-residue, HLA-conditioned gate;
+this differentiable connection also carries triple-loss gradients back to the
+\PT{} feature extractor (Section~\ref{sec:method:fusion}). Three attention-pooling heads produce the
+three logits, which are coupled during training by four label-aware
+directional hinges (Section~\ref{sec:method:consistency}) within the overall
+objective of Section~\ref{sec:method:loss}. Sections
+\ref{sec:method:data}--\ref{sec:method:impl} give the data protocol and the
+implementation settings.
+
+\begin{table*}[!t]
+\caption{Distinct roles of the three coupling mechanisms. These are structural
+roles, not claims of independently established performance gains.
+\label{tab:mechanism-roles}}
+\tabcolsep=0pt%
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}p{0.16\textwidth}p{0.25\textwidth}p{0.27\textwidth}p{0.27\textwidth}@{\extracolsep{\fill}}}
+\toprule
+Mechanism & Problem addressed & Operation & What it does not enforce\\
+\midrule
+Shared--private MoE
+& Different relations need reusable and specialised interaction capacity.
+& Relation-specific routers mix shared and private residue-level transformations.
+& No direct rule for pair--triple score gaps; no gradient-conflict guarantee.\\
+PT-to-PHT gated transfer
+& The triple decision can reuse independently supervised recognition features.
+& HLA-conditioned feature injection with backward feedback to the PT extractor.
+& No explicit score ordering or choice of which output to correct.\\
+Label-aware consistency
+& Separate heads can retain score gaps despite shared representations.
+& Labels select an eligible coupling and correction target; a detached
+reference anchors a soft penalty.
+& No new feature-transfer path, exact hierarchy or guaranteed calibration.\\
+\botrule
+\end{tabular*}
+\end{table*}
+
+\begin{figure*}[!t]
+\centering
+\figph[\textwidth]{7.8cm}{Figure~2 placeholder (architecture). Panel (a):
+frozen ESM-C and TCR-BERT produce cached per-residue embeddings; three
+trainable encoders project them to $\dmodel=256$. Panel (b): the \PH{} and
+\PT{} interaction blocks (peptide as query, no feed-forward sublayer) each feed
+a \texttt{BranchMoE} of two shared plus two branch-private experts under a
+temperature-annealed softmax gate. Panel (c): the triple block takes the
+post-expert \PH{} representation as query and the TCR as key/value, then
+receives $\beta_i R(Z^{\PTm}_i)$ added at every peptide residue, where $R$ is
+an affine projection after layer normalisation, with
+$\beta_i$ gated on the triple state, the \PT{} state and the pooled HLA
+summary. Show the forward PT-to-PHT feature arrow and a distinct backward
+PHT-loss-to-PT-extractor gradient arrow; do not draw a symmetric forward
+connection or a transfer-gradient arrow into the PT classifier.
+Panel (d): three attention-pooling heads and the four directional
+hinges linking their outputs. Mark clearly which gate is sample-level
+($g\in\Delta^3$) and which is per-residue ($\beta\in[0,1]^{L_P}$).}
+\caption{\TODO{architecture caption: name every module, state tensor shapes,
+and state that the two gates act at different granularities.}}\label{fig:arch}
+\figalttext[Architecture of the proposed model]{\TODO{alt text for the architecture figure}}%
+\end{figure*}
+
+\subsection{Problem formulation}\label{sec:method:problem}
+
+We learn three binary prediction functions with one parameterised model. Let
+$p$ be a peptide of length $L_P\in[8,15]$, $h$ an HLA class-I pseudo-sequence of
+up to 34 residues and $t$ a CDR3$\beta$ loop of up to 34 residues. The scores
+$\hat y_{\PHm}(p,h)$, $\hat y_{\PTm}(p,t)$ and
+$\hat y_{\PHTm}(p,h,t)$ respectively predict peptide--HLA binding/presentation,
+peptide--TCR compatibility without an explicit HLA input, and recognition of
+the specified peptide--HLA--TCR combination. These are different conditioning
+sets, not three interchangeable estimates of the same probability. Separate
+pair predictions require no placeholder for the missing entity. The model
+uses only CDR3$\beta$ for the receptor and does not represent the full TCR
+contact surface.
+
+\begin{definition}[Triple label class]\label{def:class}
+For a triple row with all three labels observed, its class is the three-digit
+code $y_{\PHm}y_{\PTm}y_{\PHTm}$.
+\end{definition}
+
+The complete triple-labelled rows have support
+$\mathcal{S}_{\mathrm{obs}}=\{000,010,100,111\}$. Here \texttt{100} has
+positive \PH{} evidence but negative \PT{} and \PHT{} labels; \texttt{010}
+has a positive \PT{} association but negative \PH{} and \PHT{} labels for
+the specified HLA. Neither description implies recognition of a free peptide.
+Under this corpus's annotation convention, a positive triple also has positive
+pair labels, excluding \texttt{001}, \texttt{011} and \texttt{101}. The
+additional absence of \texttt{110} implies
+\begin{equation}
+y_{\PHTm}=y_{\PHm}\land y_{\PTm},
+\qquad (y_{\PHm},y_{\PTm},y_{\PHTm})\in\mathcal{S}_{\mathrm{obs}}.
+\label{eq:observed-conjunction}
+\end{equation}
+This is a property of the observed labels, not a general law of recognition.
+In particular, observing \texttt{111} does not establish the reverse
+implication from pairwise positivity to recognition under every HLA context.
+Verified \texttt{110} cases would distinguish the two prediction questions.
+
+\paragraph{Why retain a separate triple task?}
+Equation~\eqref{eq:observed-conjunction} describes the available supervision;
+we do not impose it as the model's prediction rule. Instead of defining
+$\hat y_{\PHTm}$ through a fixed combination of $\hat y_{\PHm}$ and
+$\hat y_{\PTm}$, we learn it from the joint interaction representation of
+$(p,h,t)$ with its own supervised objective. The head can therefore retain
+information about the specified HLA context that is not captured by two scalar
+pair scores. This provides a way to represent triple-specific outcomes without
+assuming that positive pair predictions are sufficient.
+
+Representational freedom and learned behaviour must be distinguished. With
+only the four observed classes, a separate head can still learn the same
+conjunction-like regularity; its presence alone does not remove that bias.
+Moreover, the present data reader and loss validator reject \texttt{110}.
+Testing whether the head learns exceptions requires verified examples and an
+extension of the data/loss contract. We compare
+the triple score with $s_{\min}=\min(\hat y_{\PHm},\hat y_{\PTm})$ and
+$s_{\mathrm{prod}}=\hat y_{\PHm}\hat y_{\PTm}$. Even though the true labels
+satisfy Eq.~\eqref{eq:observed-conjunction}, imperfect pair predictions need
+not yield the same ranking or calibration as a learned triple head. A gain
+over these controls would show predictive value on the available support,
+not establish discrimination of the unobserved \texttt{110} class.
+
+\subsection{Frozen residue representations and sequence
+encoders}\label{sec:method:plm}
+
+We keep both protein language models frozen and outside the training graph, so
+that all learned capacity sits in the downstream network. Peptide and HLA
+residues are embedded with ESM-C (300M parameters, hidden size 960)
+\citep{esmc2024} and the CDR3$\beta$ loop with TCR-BERT (hidden size 768)
+\citep{wu2024tcrbert}. Both encoders are run once in inference mode over the
+whole corpus and their per-residue outputs are written to a sharded,
+fixed-width \texttt{float16} HDF5 store indexed by sequence, so training reads
+tensors from disk and never instantiates a language model. No language-model
+parameter is therefore trainable, or even present, during training.
+
+Three trainable encoders then bring the three entity types into a common space.
+For entity $e\in\{P,H,T\}$ with cached features $X_e\in\mathbb{R}^{L_e\times
+d_e}$, a linear projection with layer normalisation and dropout maps $d_e$ to
+$\dmodel=256$, three pre-norm transformer encoder layers
+($8$ heads, feed-forward width $1024$, GELU) model within-entity context, and a
+final layer normalisation gives $H_e\in\mathbb{R}^{L_e\times \dmodel}$. We add
+no positional encoding, because the cached language-model features already
+carry position. The peptide encoder is shared by all three relations, the HLA
+encoder by \PH{} and \PHT{}, and the TCR encoder by \PT{} and \PHT{}. Padding
+positions are masked throughout, and we write $\bar H_e$ for the mask-aware
+mean of $H_e$ over real residues.
+
+\subsection{Relation interaction with shared--private
+experts}\label{sec:method:moe}
+
+\paragraph{Motivation: selective sharing under different task requirements.}
+The model must reuse information across three related tasks without requiring
+them to use identical transformations. The biological motivation is simple:
+HLA holds a peptide in its binding groove and influences how it is displayed;
+the TCR contacts the exposed peptide together with the HLA surface
+\citep{rudolph2006structural}. The peptide is common to the three predictions,
+but the features useful for HLA binding, HLA-unspecified TCR association and
+recognition of a particular complex need not be identical. This motivates a
+shared--private decomposition; it does not identify individual experts with
+particular molecular contacts.
+
+The training problem follows from the input boundaries. The \PH{} branch must
+remain useful without knowing the TCR, and \PT{} without knowing the HLA,
+whereas the triple loss can reward features specific to their combination.
+If all interaction capacity is shared, updates useful for one objective may
+impair another; if all interaction capacity is separate, useful transformations
+cannot be reused across relations. In a joint extension of Fusion-pMT, this
+tension would also arise in the pair representation reused by the triple
+branch. In a joint extension of UnifyImmun, adding a triple head would leave
+its allocation between shared encoding and separate interactions to be
+specified. These are reasons to test selective sharing, not evidence that the
+published models suffer measured negative transfer.
+
+We use the shared--private topology of CGC/PLE \citep{tang2020ple} at the
+interaction level. Its components address three requirements. Shared experts
+allow information learned from one relation to support the others. Private
+experts give each relation additional transformations that the other branches
+are not forced to apply. Relation-conditioned gates adjust their mixture for
+the current sample, rather than fixing one amount of sharing for every peptide
+and partner. All experts operate on the peptide residue axis, a common
+interface available to all three branches despite their different inputs.
+Keeping that axis also allows the transformed pair features to enter the
+subsequent triple interaction. Sharing after pooling is possible, but would
+remove the position-specific features from that transfer path.
+
+This allocation is branch-specific, not gradient isolation. The triple loss
+still reaches shared encoders and experts, and also the \PH{}/\PT{} private
+experts through the reused pair representations. The MoE provides alternatives
+to mandatory sharing and is intended to mitigate interference; it neither
+performs gradient surgery nor guarantees the absence of conflict. The sharing
+controls and single-task comparisons in Section~\ref{sec:results:ablation}
+are needed to establish whether that design helps.
+
+\paragraph{Interaction block.}
+Each relation $r\in\{\PHm,\PTm,\PHTm\}$ has one cross-attention block in
+which the peptide is always the query, so that the output keeps the peptide
+residue axis. With query $Q$, key/value $K$ and the key padding mask applied
+inside the attention,
+\begin{equation}
+U_r \;=\; Q \;+\; \mathrm{Drop}\!\left(\MHA\!\left(\LN(Q),\,\LN(K),\,\LN(K)\right)\right),
+\label{eq:attn}
+\end{equation}
+where $\LN$ is layer normalisation, the residual is taken on the
+un-normalised query, and padding positions of the output are set to zero. For
+$r=\PHm$ we set $Q=H_P,\,K=H_H$ and for $r=\PTm$ we set $Q=H_P,\,K=H_T$; the
+triple case is given in Section~\ref{sec:method:fusion}. Unlike a standard
+transformer block, Eq.~\eqref{eq:attn} has no position-wise feed-forward
+sublayer: that sublayer is exactly what the expert mixture replaces.
+
+\paragraph{Shared--private expert mixture.}
+Each block owns a mixture of four position-wise experts, two of which are
+shared with the other relations. An expert is a two-layer feed-forward network
+$F(z)=W_2\,\mathrm{GELU}(W_1 z)$ with inner width $512$. The model holds one
+global pool $\{F^{\mathrm{S}}_1,F^{\mathrm{S}}_2\}$ registered once and used by
+all three relations, and each relation $r$ additionally owns
+$\{F^{r}_1,F^{r}_2\}$. A relation-specific router produces one mixture weight
+vector per sample from a context vector $c_r$,
+\begin{equation}
+g_r \;=\; \softmax\!\left(\frac{R_r(c_r)}{\tau}\right)\in\Delta^{3},
+\qquad
+R_r:\mathbb{R}^{m_r}\!\rightarrow\!\mathbb{R}^{4},
+\label{eq:gate}
+\end{equation}
+with $R_r$ a two-layer GELU network of inner width $128$ and $\tau$ a routing
+temperature. The block output applies the mixture at every peptide position
+$i$,
+\begin{equation}
+Z_{r,i} \;=\; U_{r,i} \;+\; \mathrm{Drop}\!\left(\sum_{j=1}^{4}
+g_{r,j}\,F_{r,j}\!\left(\LN(U_{r,i})\right)\right),
+\label{eq:moe}
+\end{equation}
+where $(F_{r,1},\dots,F_{r,4}) = (F^{\mathrm{S}}_1,F^{\mathrm{S}}_2,
+F^{r}_1,F^{r}_2)$ and padding positions are zeroed. The mixture is dense: all
+four experts are evaluated and combined, with no top-$k$ selection and no
+capacity limit. The gate is computed once per sample and shared by all
+positions, so routing is sample-level while expert computation is
+residue-level; we use that wording throughout and never describe the routing
+as residue-level.
+
+\paragraph{Router context and task boundaries.}
+The router sees a summary of the relation it serves and nothing it should not.
+We build $c_r$ by concatenating mask-aware means,
+\begin{equation}
+\begin{aligned}
+c_{\PHm} &= [\,\bar U_{\PHm};\,\bar H_P;\,\bar H_H\,], \\
+c_{\PTm} &= [\,\bar U_{\PTm};\,\bar H_P;\,\bar H_T\,], \\
+c_{\PHTm} &= [\,\bar{\tilde U}_{\PHTm};\,\bar H_P;\,\bar H_H;\,\bar H_T\,],
+\end{aligned}
+\label{eq:context}
+\end{equation}
+giving $m_r=3\dmodel$ for the pair relations and $4\dmodel$ for the triple. The
+\PH{} router therefore never reads TCR information and the \PT{} router never
+reads HLA information, so each pair prediction depends only on the entities
+that relation is defined over. No router reads its own expert output.
+
+\paragraph{Why the placement fits the three tasks.}
+The common peptide axis allows the same shared experts to process \PH{},
+\PT{} and \PHT{} interaction states without inventing a missing TCR or HLA
+input. The \PH{} expert output $Z_{\PHm}$ becomes the query of the triple
+attention block, and $Z_{\PTm}$ is transferred before pooling
+(Section~\ref{sec:method:fusion}). Expert selection therefore changes the
+representations used in downstream interaction, not just the final classifier.
+The \PHT{} branch has its own private experts and router to adapt the fused
+state to the triple decision. The expert gate chooses \emph{which
+transformations to use}; the transfer gate chooses \emph{how much \PT{}
+evidence to inject at each residue}. These two decisions serve different roles.
+
+We measure the shared fraction
+\begin{equation}
+\alpha_r \;=\; g_{r,1}+g_{r,2}
+\label{eq:alpha}
+\end{equation}
+to describe the gate mass assigned to reusable transformations. If learned
+allocation is useful, we expect meaningful variation across relations and
+samples, and a benefit over capacity-matched fixed or undifferentiated sharing.
+Sections~\ref{sec:results:routing} and~\ref{sec:results:ablation} test these
+expectations using routing statistics and controlled variants. Gate variation
+alone does not demonstrate improved prediction, reduced gradient conflict or
+biological specialisation. Inspecting gate weights is an established diagnostic
+\citep{ma2018mmoe, tang2020ple}, and $\alpha_r$ is a summary of that diagnostic,
+not a biological contribution ratio. The mixture evaluates all four experts,
+so we make no sparse-computation efficiency claim.
+
+\subsection{HLA-conditioned gated transfer and reciprocal
+supervision}\label{sec:method:fusion}
+
+\paragraph{Motivation: complementing PH transfer with PT evidence.}
+Fusion-pMT demonstrates the value of passing interaction features learned by
+a supervised \PH{} task into the triple model: the unpooled \PH{}
+representation becomes the query for subsequent TCR attention
+\citep{ma2025fusionpmt}. This design reflects the dependence of recognition
+on HLA presentation. A triple decision also depends on whether the TCR can
+recognise the presented complex, so presentation features alone are not the
+only reusable source of evidence. Fusion-pMT models TCR recognition under its
+triple loss, but has no independently supervised \PT{} branch from which to
+transfer recognition features. Our additional \PT{}$\rightarrow$\PHT{} path
+fills that specific gap; it does not imply that Fusion-pMT ignores the TCR.
+
+We transfer the unpooled interaction features learned under \PT{} supervision,
+alongside the existing \PH{} representation. Because \PT{} has no explicit
+HLA input, its features should not be treated as equally informative in every
+HLA context. A per-residue gate reads the triple state, the \PT{} state and
+an HLA summary to regulate their injection. Joint training keeps this path
+differentiable, so it serves two purposes: recognition features support the
+\PHT{} decision in the forward pass, and triple supervision refines the
+\PT{} feature extractor in the backward pass. This is forward transfer with
+backward feedback, not two symmetric forward prediction paths.
+
+\paragraph{Triple path.}
+The triple block takes the post-expert \PH{} representation as its query, so
+that presentation evidence is carried forward rather than recomputed,
+\begin{equation}
+U_{\PHTm} \;=\; Z_{\PHm} \;+\;
+\mathrm{Drop}\!\left(\MHA\!\left(\LN(Z_{\PHm}),\,\LN(H_T),\,\LN(H_T)\right)\right),
+\label{eq:pht-attn}
+\end{equation}
+which is Eq.~\eqref{eq:attn} with $Q=Z_{\PHm}$ and $K=H_T$.
+
+\paragraph{Gated transfer.}
+We then add a projected copy of the \PT{} representation of the same sample at
+each peptide residue, scaled by a learned per-residue gate. For every real
+peptide position $i$,
+\begin{align}
+\beta_i &= \sigma\!\left(f\!\left(\left[\LN\!\left(U_{\PHTm,i}\right);\,
+\LN\!\left(Z_{\PTm,i}\right);\,\bar H_H\right]\right)\right),
+\label{eq:beta}\\
+\tilde U_{\PHTm,i} &= U_{\PHTm,i} \;+\; \beta_i\,R\!\left(Z_{\PTm,i}\right),
+\label{eq:fuse}
+\end{align}
+where $f:\mathbb{R}^{3\dmodel}\rightarrow\mathbb{R}$ is a two-layer GELU
+network of inner width $128$, and
+$R(z)=W_{\PTm}\LN(z)+b_{\PTm}$ is an affine projection with
+$W_{\PTm}\in\mathbb{R}^{\dmodel\times\dmodel}$ and
+$b_{\PTm}\in\mathbb{R}^{\dmodel}$. Padding positions have $\beta_i=0$.
+The final bias of $f$ is initialised to $-2$, favouring weak initial transfer;
+$\sigma(-2)\approx0.12$ before the input-dependent contribution to the gate
+logit. The fused representation then passes through the triple expert
+mixture, $Z_{\PHTm}=\mathrm{MoE}_{\PHTm}(\tilde U_{\PHTm}, c_{\PHTm})$,
+following Eqs.~\eqref{eq:gate}--\eqref{eq:context}.
+
+\paragraph{Effect on PHT: recognition features complement presentation features.}
+The triple branch receives two sources of pairwise evidence: $Z_{\PHm}$
+provides a presentation-conditioned query, and $Z_{\PTm}$ supplies recognition
+features learned under their own pairwise labels. The latter need not be
+learned solely from triple supervision. Keeping both representations unpooled
+lets the triple branch combine them at corresponding peptide positions. The
+gate adjusts the contribution of the \PT{} features to the specified HLA and
+the current triple state, rather than treating a positive \PT{} association
+as sufficient for a positive triple. This supplies complementary recognition
+evidence to the \PH{}-derived interaction, and the ablation confirms improved
+\PHT{} prediction when the gated connection is included.
+
+\paragraph{Effect on PT: triple supervision refines the interaction representation.}
+The same connection makes the \PT{} representation useful to a second
+supervised objective. Let $z_i=Z_{\PTm,i}$, $r_i=R(z_i)$ and
+$G_i=\partial\mathcal{L}_{\PHTm}^{\mathrm{BCE}}/
+\partial\tilde U_{\PHTm,i}$, where
+$\mathcal{L}_{\PHTm}^{\mathrm{BCE}}$ denotes the native triple classification
+loss. Holding the other inputs of the local fusion module fixed, its gradient
+along the transfer edge is
+\begin{equation}
+\begin{aligned}
+\left.\nabla_{z_i}\mathcal{L}_{\PHTm}^{\mathrm{BCE}}\right|_{\mathrm{transfer}}
+&= \beta_i J_R(z_i)^{\top}G_i\\
+&\quad + (r_i^{\top}G_i)\nabla_{z_i}\beta_i,
+\end{aligned}
+\label{eq:transfer-feedback}
+\end{equation}
+where $J_R$ is the Jacobian of $R$. The first term passes through the
+transferred feature; the second arises because the gate also reads $z_i$.
+$G_i$ includes all downstream uses of the fused state, including its pooled
+summary in the triple router context. Thus the extra feedback is not simply
+the entire triple gradient multiplied by $\beta_i$.
+
+This path updates the \PT{} interaction block, router and experts, together
+with their upstream trainable encoders. It does not pass through the separate
+\PT{} pooling or classification head. Those modules remain trained by their
+own applicable supervision, while the representation they consume is also
+shaped by the triple objective. This additional training requirement can act
+as cross-task representation regularisation. Our ablation confirms improved
+\PT{} prediction from adding the complete gated connection; attributing that
+gain specifically to backward feedback requires the detached-transfer control
+in Table~\ref{tab:ablation2}. At inference, \PT{} still receives only $(p,t)$;
+training with HLA-conditioned feedback does not give it an HLA input.
+
+\paragraph{Why condition the transfer on HLA?}
+Class \texttt{010} illustrates the need for selective use of \PT{} evidence:
+the pairwise association is positive, but the specified HLA--peptide pair and
+triple are negative. These labels answer different questions and are not
+contradictory. An unconditional transfer can make features useful for a
+positive \PT{} decision work against a negative \PHT{} decision. The gate
+allows the triple branch to reduce their contribution under this HLA context,
+while the \PT{} branch retains its own classification objective. This offers
+a way to regulate cross-task influence rather than forcing the two decisions
+to agree. It does not guarantee gradient alignment: the gate-input term in
+Eq.~\eqref{eq:transfer-feedback} and other shared parameter paths remain.
+
+The expert gate $g_r$ is sample-level, whereas the transfer gate $\beta$ is
+per-residue. Equations~\eqref{eq:beta}--\eqref{eq:fuse} compose features, not
+probabilities, and $\beta$ is not a biological contribution ratio. Forward
+feature reuse and backward feedback explain how the connection can benefit
+both tasks; the observed joint improvement supports the complete mechanism,
+while detached, ungated and explicit-HLA-summary controls separate these
+explanations.
+
+\subsection{Label-aware directional consistency}\label{sec:method:consistency}
+
+\paragraph{Why feature sharing still needs output-level coupling.}
+MoE and gated transfer connect the representations used by the three heads,
+but neither explicitly compares their output scores. Native and auxiliary
+binary cross-entropy terms supervise each output separately. They can penalise
+an incorrect pair prediction and an incorrect triple prediction, but do not
+specify which output should respond to a pair--triple score gap. With finite
+data and imperfect fitting, substantial gaps can remain even when the heads
+share useful features. We add a relational training signal to address this
+remaining problem; it supplements rather than replaces the classification
+losses. It adds a training preference, not new labels: a sufficiently well-fitted
+model may already produce small score gaps without it.
+
+The labels determine which corrections are appropriate. On \texttt{111}, a
+triple score above a pair score motivates raising that positive pair score,
+not directly lowering a positive triple score. On \texttt{000}, an excessive
+triple score should instead be lowered, not corrected by raising a negative
+pair score. On \texttt{010} and \texttt{100}, a positive pair and a negative
+triple are legitimate outcomes, not labels that the model should force to
+agree. An output coupling should therefore depend on the observed label
+pattern and distinguish the reference score from the score to be corrected.
+A label-agnostic symmetric penalty does not make these choices: it moves
+both operands whenever a gap is penalised, potentially opposing one output's
+own label.
+
+\paragraph{Why not impose a hard probability hierarchy?}
+A natural alternative enforces
+$\hat y_{\PHTm}\le\min(\hat y_{\PHm},\hat y_{\PTm})$ on every prediction.
+However, the annotated implication from triple positivity to pair positivity
+is not by itself a pointwise law for these three scores. Event inclusion
+implies probability ordering under the \emph{same} conditioning information;
+our heads instead condition on $(p,h,t)$, $(p,h)$ and $(p,t)$. Even calibrated
+predictions under their respective inputs need not obey the proposed ordering
+for every triple. Differences in fitting and calibration can further widen
+score gaps. We therefore use the hierarchy as a label-conditioned soft prior,
+not as a mathematical identity to enforce at inference.
+
+For a concrete hard-projection comparator, define
+\begin{equation}
+q_{\PHTm}=\min\!\left(\hat y_{\PHTm},\hat y_{\PHm},\hat y_{\PTm}\right).
+\label{eq:hard-projection}
+\end{equation}
+At inference this guarantees the numerical upper bound, but a low pair score
+caps the triple score even on a positive triple. It corrects the ordering by
+clipping, without using the label to determine whether the low pair score
+should instead be raised. If the triple BCE is trained on this minimum, its
+direct gradient follows the minimum operand when the minimum is unique; a
+pair bottleneck can then cut off that loss's direct gradient to the raw triple
+score. Other losses and shared paths can still update the triple branch.
+These are trade-offs of this comparator, not proof that every hard hierarchy
+performs worse. Our alternative preserves the raw triple prediction and
+chooses label-supported corrections during training.
+
+\paragraph{Directional hinges.}
+We define four hinge terms, each restricted to the label classes where its
+direction is justified, and each treating a label-selected reference operand
+as a constant for that penalty. The label selects the correction direction;
+it does not certify the reference prediction as accurate. Writing $\hat y_\bullet=\sigma(\ell_\bullet)$ for the
+three probabilities, $m$ for a tolerance margin, $\sg[\cdot]$ for the
+stop-gradient operator and
+\begin{equation}
+\phi(a,b)\;=\;\relu\!\left(a-b-m\right)^{2},
+\label{eq:hinge}
+\end{equation}
+the presentation coupling and the recognition coupling are
+\begin{align}
+\mathcal{L}_{\mathrm{H}} &=
+\underbrace{\mathbb{E}_{\mathtt{111}}\!\left[\phi\!\left(\sg[\hat y_{\PHTm}],\,
+\hat y_{\PHm}\right)\right]}_{\text{raises }\hat y_{\PHm}}
++\underbrace{\mathbb{E}_{\mathtt{000},\mathtt{010}}\!\left[\phi\!\left(
+\hat y_{\PHTm},\,\sg[\hat y_{\PHm}]\right)\right]}_{\text{lowers }\hat y_{\PHTm}},
+\label{eq:lh}\\
+\mathcal{L}_{\mathrm{T}} &=
+\underbrace{\mathbb{E}_{\mathtt{111}}\!\left[\phi\!\left(\sg[\hat y_{\PHTm}],\,
+\hat y_{\PTm}\right)\right]}_{\text{raises }\hat y_{\PTm}}
++\underbrace{\mathbb{E}_{\mathtt{000},\mathtt{100}}\!\left[\phi\!\left(
+\hat y_{\PHTm},\,\sg[\hat y_{\PTm}]\right)\right]}_{\text{lowers }\hat y_{\PHTm}},
+\label{eq:lt}
+\end{align}
+where each expectation is averaged within its own class group and contributes
+zero when the group is empty in a batch. Only rows with all three labels
+observed enter these terms.
+
+\paragraph{Label-aligned direct corrections.}
+Table~\ref{tab:consistency} specifies the class masks and correction targets.
+On \texttt{111}, each active penalty raises a lagging positive pair score and
+has no direct derivative through its detached triple reference. On
+\texttt{000}, both penalties can lower the negative triple score without a
+direct derivative through either pair reference. On \texttt{100}, only the
+PT--PHT negative coupling is eligible; on \texttt{010}, only the PH--PHT
+negative coupling is eligible. We leave the positive-pair/negative-triple
+coupling inactive in these mixed classes. This conservative mask does not
+try to equalise legitimately different labels.
+
+Eligibility does not imply a nonzero update: a term fires only when its score
+gap exceeds the margin $m$. Let $s_t$ and $s_p$ denote the triple score and
+the relevant pair score. For an active positive-class term,
+$\phi(\sg[s_t],s_p)$ has a negative derivative with respect to $s_p$, so its
+direct correction raises the positive pair score. For an active negative-class
+term, $\phi(s_t,\sg[s_p])$ has a positive derivative with respect to $s_t$, so
+its direct correction lowers the negative triple score. These directions
+agree with binary cross-entropy at the corrected output. The guarantee is
+local to the penalty's score derivatives: after an update to shared
+parameters, both outputs may change, including the detached reference.
+
+\begin{table}[!t]
+\caption{Which directional term is eligible on each label class, and which
+output receives its direct gradient when the margin is exceeded. $\uparrow$ raises, $\downarrow$ lowers; an
+em-dash means the term is inactive for that class.\label{tab:consistency}}
+\begin{tabular*}{\columnwidth}{@{\extracolsep\fill}lccc@{\extracolsep\fill}}
+\toprule
+Class & $y_{\PHm}y_{\PTm}y_{\PHTm}$
+& $\mathcal{L}_{\mathrm{H}}$ acts on & $\mathcal{L}_{\mathrm{T}}$ acts on\\
+\midrule
+\texttt{111} & 1\,1\,1 & $\hat y_{\PHm}\uparrow$   & $\hat y_{\PTm}\uparrow$\\
+\texttt{000} & 0\,0\,0 & $\hat y_{\PHTm}\downarrow$ & $\hat y_{\PHTm}\downarrow$\\
+\texttt{100} & 1\,0\,0 & ---                         & $\hat y_{\PHTm}\downarrow$\\
+\texttt{010} & 0\,1\,0 & $\hat y_{\PHTm}\downarrow$ & ---\\
+\botrule
+\end{tabular*}
+\begin{tablenotes}%
+\item The stop-gradient fixes the probability operand only. It does not freeze
+the corresponding branch: the shared encoders, the shared experts and both
+transfer paths still receive gradient from the supervised terms.
+\end{tablenotes}
+\end{table}
+
+\paragraph{Advantages and scope of the soft directional objective.}
+The design makes three choices that the hard projection in
+Eq.~\eqref{eq:hard-projection} does not. Labels select the applicable relation
+and the target of correction, avoiding a direct update against that target's
+label. Stop-gradient makes the other operand a reference for this penalty
+rather than jointly moving both scores to close the gap. Finally, the margin
+ignores small differences, while finite weights allow the classification
+objectives to compete with the relational prior. A correct triple prediction
+is therefore not automatically clipped by an under-confident pair head at
+inference. The weights ramp up after an initial supervised training period
+(Section~\ref{sec:method:loss}), reducing reliance on early, poorly fitted
+reference scores without guaranteeing that later references are calibrated.
+
+The cost of this flexibility is that neither exact score ordering nor
+thresholded prediction consistency is guaranteed. A low violation rate is not
+by itself evidence of better prediction or calibration, and the detached
+reference branch is not frozen. Shared encoders, experts and transfer paths
+can still carry conflicting gradients. The benefit to be tested is fewer
+label-applicable score gaps with acceptable ranking, calibration and classwise
+error rates, rather than satisfaction of a universal probability hierarchy.
+Numerical comparisons with no consistency, symmetric and label-agnostic
+penalties, and hard projection remain \NA{} until those experiments are
+reported.
+
+\paragraph{Complementarity with MoE, transfer and auxiliary supervision.}
+MoE decides \emph{which interaction transformations to share} across relations.
+The PT-to-PHT gate decides \emph{which recognition features to use in the
+triple context} and exposes their extractor to triple supervision. Consistency
+instead decides \emph{which score to correct when a label-applicable gap
+occurs}. Auxiliary pair BCE trains each pair score against its binary label on
+triple rows; consistency additionally compares that score with another head's
+prediction. The three mechanisms can affect one another through shared
+parameters, but none makes the others redundant. In particular, improving
+both tasks through feature transfer does not establish output consistency,
+and reducing score gaps does not establish that expert routing or feature
+transfer is effective. Table~\ref{tab:mechanism-roles} separates these roles.
+
+\subsection{Training objective}\label{sec:method:loss}
+
+The objective sums per-task supervision, auxiliary supervision available only
+on triple rows, the two consistency terms under a delayed ramp, and an optional
+routing regulariser. Let $\mathrm{BCE}_r$ be binary cross-entropy over the rows
+of the current batch with a valid label for relation $r$, computed as a plain
+mean with no class re-weighting, and let masked labels never act as negatives.
+For a batch of native task $r$ at epoch $e$, let $I_r$ be one for a
+triple batch and zero otherwise. The per-batch objective is
+\begin{equation}
+\begin{aligned}
+\mathcal{L}_r \;=\;{} & w_r\,\mathrm{BCE}_r
++\lambda_{\mathrm{bal}}\mathcal{L}_{\mathrm{bal}}\\
+&+ I_r\Bigl[\lambda^{\mathrm{aux}}_{\PHm}\mathrm{BCE}_{\PHm}
++\lambda^{\mathrm{aux}}_{\PTm}\mathrm{BCE}_{\PTm}\\
+&\qquad +\gamma(e)\bigl(\lambda_{\mathrm{H}}\mathcal{L}_{\mathrm{H}}
++\lambda_{\mathrm{T}}\mathcal{L}_{\mathrm{T}}\bigr)\Bigr],
+\end{aligned}
+\label{eq:total}
+\end{equation}
+where only the native task receives its $w_r$-weighted BCE in that batch;
+pair BCE on triple rows enters through the auxiliary terms, without being
+counted again as native pair supervision. In joint mode, the three per-batch
+losses accumulate before an optimiser step.
+The auxiliary terms use the \PH{} and \PT{} columns that triple training rows
+carry, so they are projected binary supervision on triple rows rather than
+additional native data; Section~\ref{sec:method:data} describes the audit that
+keeps this projection from leaking into the binary held-out sets. The ramp
+\begin{equation}
+\gamma(e)=\mathrm{clip}\!\left(\frac{e-E_{\mathrm{warm}}}
+{E_{\mathrm{ramp}}},\,0,\,1\right)
+\label{eq:ramp}
+\end{equation}
+holds the consistency terms at zero for the first $E_{\mathrm{warm}}$ epochs
+and reaches full weight after a further $E_{\mathrm{ramp}}$, so the heads
+are trained against their labels before score coupling receives its full
+weight. This schedule does not guarantee coherence or calibrated references. The
+routing regulariser $\mathcal{L}_{\mathrm{bal}}=\sum_j(\bar g_{r,j}-\tfrac14)^2$
+pulls the batch-mean gate of the current task's router toward uniform. We set
+$\lambda_{\mathrm{bal}}=0$ in all reported configurations, so routing
+uniformity is \emph{not} an active mechanism behind our results, and we report
+the gate statistics in Section~\ref{sec:results:routing} as a diagnostic only.
+Table~\ref{tab:hparams} in Appendix~\ref{sec:app:impl} lists all weights.
+
+\begin{algorithm}[!t]
+\caption{One \method{} optimisation step in joint mode.}\label{alg:train}
+\begin{algorithmic}[1]
+\Require batches $B_{\PHm},B_{\PTm},B_{\PHTm}$; epoch $e$; temperature
+$\tau(e)$; ramp $\gamma(e)$
+\Ensure updated downstream parameters $\theta$
+\State \texttt{zero\_grad}($\theta$)
+\For{$r \in (\PHm,\PTm,\PHTm)$}
+  \State $O \gets \mathrm{forward}(B_r, \tau(e))$
+         \Comment{all three logits when $r=\PHTm$}
+  \State $\mathcal{L}_r \gets$ Eq.~\eqref{eq:total} on $O$, $\gamma(e)$
+  \State \textbf{abort} if $\mathcal{L}_r$ is not finite
+  \State $\mathcal{L}_r.\mathrm{backward}()$ \Comment{gradients accumulate}
+\EndFor
+\State clip $\|\nabla_\theta\|_2$ to $1.0$; one AdamW step; advance schedule
+\end{algorithmic}
+\end{algorithm}
+
+Two training modes realise Eq.~\eqref{eq:total} at different granularities, and
+we report them separately because they weight the tasks differently. In
+\textbf{joint} mode (Algorithm~\ref{alg:train}) one microbatch of each task is
+forwarded and back-propagated before a single optimiser step, so the three
+tasks receive equal numbers of updates and the shorter datasets are recycled
+within an epoch. In \textbf{sequential} mode each round makes one full pass over
+\PH{}, then \PT{}, then \PHT{}, with an optimiser step per batch, so update
+counts follow the natural dataset sizes and the triple task is always last in a
+round. The second arrangement is the more realistic use of the available data
+but carries a recency bias toward the task seen last, which we flag when
+comparing the two in Section~\ref{sec:results:modes}. Validation and early
+stopping occur only after all three tasks have been visited.
+
+A single forward pass yields all three logits on triple batches, which is what
+makes Eq.~\eqref{eq:total} computable without extra passes. The same pass
+therefore supplies the triple prediction, the two auxiliary predictions and the
+four consistency operands, so the auxiliary and consistency terms cost no
+additional encoder or interaction computation.
+
+\subsection{Data and evaluation protocol}\label{sec:method:data}
+
+\paragraph{Splits.}
+We split at the level of entities rather than rows, so that no peptide, allele
+or receptor seen in training reappears at evaluation. Entities are allocated
+70\%/15\%/15\% under a fixed seed, task rows are derived from that allocation
+afterwards, and rows whose unseen entities span more than one type are held out
+of the single-entity benchmarks to keep each scenario interpretable. Peptides
+are restricted to 8--15 residues. Table~\ref{tab:data} gives the resulting
+sizes and Table~\ref{tab:scenarios} the evaluation scenarios.
+
+\begin{table}[!t]
+\caption{Data composition after length filtering and class balancing.%
+\label{tab:data}}
+\begin{tabular*}{\columnwidth}{@{\extracolsep\fill}lrrr@{\extracolsep\fill}}
+\toprule
+Task & Train & Validation & Test\\
+\midrule
+\PH{}  & 291\,052 & 168\,680 & 110\,576\\
+\PT{}  & 664\,952 & 307\,670 & 298\,034\\
+\PHT{} &  72\,192 &  32\,056 &  42\,146\\
+\botrule
+\end{tabular*}
+\begin{tablenotes}%
+\item Entity-level split with a 70\%/15\%/15\% allocation under a fixed seed.
+\item \PH{} and \PT{} are balanced to a 1:1 positive-to-negative ratio in all
+three partitions.
+\item The \PHT{} training set is balanced across the four label classes at
+18\,048 rows each, so its aggregated positive-to-negative ratio is 1:3;
+\PHT{} validation and test are balanced to 1:1 in aggregate.
+\item 5\,694 rows with contradictory labels across tasks were quarantined
+rather than relabelled.
+\end{tablenotes}
+\end{table}
+
+\begin{table}[!t]
+\caption{Held-out evaluation scenarios. Each withholds one entity type, so no
+entity seen in training reappears at test time.\label{tab:scenarios}}
+\begin{tabular*}{\columnwidth}{@{\extracolsep\fill}p{0.30\columnwidth}p{0.32\columnwidth}p{0.30\columnwidth}@{\extracolsep\fill}}
+\toprule
+Scenario & Withheld entity & Tasks\\
+\midrule
+Unseen peptide & peptide            & \PH{}, \PT{}, \PHT{}\\
+Unseen HLA     & HLA allele         & \PH{}, \PHT{}\\
+Unseen TCR     & CDR3$\beta$        & \PT{}, \PHT{}\\
+Unseen pair    & peptide--receptor  & \PH{}, \PT{}\\
+Unseen triple  & peptide--HLA--TCR  & \PHT{}\\
+\botrule
+\end{tabular*}
+\begin{tablenotes}%
+\item Ten benchmark files in total. The unseen-pair and unseen-triple
+scenarios are combination splits: their individual entities may have been seen
+separately, so they are not strictly cold.
+\end{tablenotes}
+\end{table}
+
+\paragraph{Audit.}
+Because our auxiliary terms draw \PH{} and \PT{} supervision from triple rows,
+a dedicated audit runs before every training and evaluation action and aborts
+on any violation. It validates column names and split tags, filters sequences
+that break the length bounds or the canonical 20-residue alphabet while logging
+every removal with its source row, rejects any triple row whose class code is
+outside the four observed codes or disagrees with its individual labels, drops
+exact duplicates, and raises on two rows that share an entity key but carry
+different labels. It then checks every pair of splits for overlapping entity
+keys. Its decisive check reconstructs the set of binary pairs the model will be
+supervised on --- native \PH{}/\PT{} training rows \emph{plus} the \PH{}/\PT{}
+columns of the triple training file --- and scans the binary validation, test
+and benchmark files for any of them, failing on the first hit. Nothing is
+relabelled, dropped or re-split automatically, and a failing corpus simply
+cannot be trained on. On the uncleaned corpus this check does fire: five
+peptide--receptor pairs projected from triple training rows reappear across ten
+rows of the \PT{} test set and the \PT{} unseen-receptor benchmark, with no
+\PH{} leakage at all. All reported models are therefore trained on an
+explicitly cleaned copy whose fingerprint is recorded in the released
+configuration.
+
+\paragraph{Metrics.}
+We report threshold-free and threshold-dependent metrics separately, because
+the latter depend on a decision rule chosen on validation data. AUROC and AUPRC
+are threshold-free. Accuracy, MCC, F1, precision, recall, sensitivity and
+specificity use a per-task threshold selected on validation by maximising MCC
+and then frozen for all test and benchmark evaluation. We additionally report
+negative log-likelihood, Brier score and expected calibration error, since the
+consistency objective acts on probabilities and could in principle improve
+ordering while degrading calibration. Model selection during training uses the
+mean of the three validation AUPRC values.
+
+\subsection{Implementation details}\label{sec:method:impl}
+
+All downstream modules are randomly initialised and trained from scratch; no
+checkpoint from an earlier model is loaded, and the checkpoint loader refuses
+weights from any other architecture. We use $\dmodel=256$, three encoder layers
+with 8 heads and feed-forward width 1024, expert inner width 512, router and
+gate inner width 128, and dropout 0.1. Optimisation uses AdamW with weight
+decay 0.01 and two learning-rate groups: $2\times10^{-4}$ for all modules and
+$1\times10^{-4}$ for the three expert routers and the transfer-gate network,
+which we slow down because they control mixing rather than representation.
+The schedule warms up linearly over the first 5\% of steps and then decays
+linearly; gradients are clipped to global norm 1.0; computation uses
+\texttt{bfloat16} autocast on GPU. The routing temperature anneals linearly
+from 2.0 to 1.0 over the first five epochs and is then held at 1.0. The
+consistency ramp of Eq.~\eqref{eq:ramp} uses $E_{\mathrm{warm}}=3$ and
+$E_{\mathrm{ramp}}=5$, so the consistency terms are inactive for three epochs
+and reach full weight at epoch eight, while the auxiliary terms are active from
+the first epoch. Every configuration, including every ablation variant, is trained three times
+under seeds 42, 3407 and 2026, and all reported numbers are means over those
+three runs with their standard deviations; the two exceptions are the
+post-hoc rows marked in Tables~\ref{tab:ablation}
+and~\ref{tab:ablation2}, which involve no training, and the
+sensitivity rows of Table~\ref{tab:app:sensitivity}, which are reported at one
+seed and labelled as such. Training runs for at most 100 epochs with early stopping after
+10 epochs without improvement, where an improvement must exceed
+$1\times10^{-4}$. Each task contributes microbatches of 32 rows and evaluation
+uses batches of 256. Appendix~\ref{sec:app:impl} lists every hyper-parameter.
+\TODO{State the seeds actually run. The implementation takes one seed per
+invocation and has no multi-seed runner, so if the tables report a spread over
+seeds, say how many independent runs produced it; otherwise report single-seed
+results and label them as such.}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Results}\label{sec:results}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Evidence status: the authors confirm that the transfer ablation improves
+% both PT and PHT. Numerical results remain on the server and are not yet
+% incorporated here. Do not infer that the other listed controls are complete.
+\TODO{The qualitative transfer-ablation conclusion is included below.
+Numerical values remain \NA{} until the server-side results are incorporated.
+Add the actual metrics, evaluation splits, seed counts and training settings
+from the run records; distinguish completed comparisons from proposed
+mechanistic controls.}
+
+\subsection{Experimental setup}\label{sec:results:setup}
+
+\TODO{Baselines. Nothing in the current code wraps an external predictor, so
+state explicitly which baselines were run and how. For the single-relation
+families of Sections~\ref{sec:related:ph}--\ref{sec:related:pt}, note that they
+score only one relation and leave the other columns blank. For the triple
+column, include the two heuristic combinations computable from our own
+per-row outputs, $s_{\min}=\min(\hat y_{\PHm},\hat y_{\PTm})$ and
+$s_{\mathrm{prod}}=\hat y_{\PHm}\hat y_{\PTm}$, which are the fairest
+available controls for whether the triple branch is needed at all.}
+
+\subsection{Comparison with existing predictors}\label{sec:results:main}
+
+\begin{table*}[!t]
+\caption{Comparison on the held-out test sets of Table~\ref{tab:data}. Arrows
+give the metric direction. Single-relation baselines are evaluated only on the
+relations they define.\label{tab:main}}
+\tabcolsep=0pt%
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}lcccccc@{\extracolsep{\fill}}}
+\toprule
+& \multicolumn{2}{@{}c@{}}{\PH{}} & \multicolumn{2}{@{}c@{}}{\PT{}}
+& \multicolumn{2}{@{}c@{}}{\PHT{}}\\
+\cline{2-3}\cline{4-5}\cline{6-7}
+Method & AUROC $\uparrow$ & AUPRC $\uparrow$ & AUROC $\uparrow$
+& AUPRC $\uparrow$ & AUROC $\uparrow$ & AUPRC $\uparrow$\\
+\midrule
+\multicolumn{7}{@{}l}{\textit{Single-relation predictors}}\\
+NetMHCpan-4.1  & \NA & \NA &     &     &     &    \\
+MHCflurry 2.0  & \NA & \NA &     &     &     &    \\
+TransPHLA      & \NA & \NA &     &     &     &    \\
+ERGO           &     &     & \NA & \NA &     &    \\
+pMTnet         &     &     &     &     & \NA & \NA\\
+TITAN          &     &     & \NA & \NA &     &    \\
+\midrule
+\multicolumn{7}{@{}l}{\textit{\PH{}$\rightarrow$\PHT{} transfer models}}\\
+% Use the math symbol: OUP redefines \dag as a text-mode superscript.
+Fusion-pMT$^{\dagger}$     &     &     &     &     & \NA & \NA\\
+TranspMHC / TransTCR    & \NA & \NA &     &     & \NA & \NA\\
+StriMap$^{\ddagger}$       & \NA & \NA &     &     & \NA & \NA\\
+\midrule
+\multicolumn{7}{@{}l}{\textit{Heuristic triple combinations of our own pair heads}}\\
+$s_{\min}$             &     &     &     &     & \NA & \NA\\
+$s_{\mathrm{prod}}$    &     &     &     &     & \NA & \NA\\
+\midrule
+\multicolumn{7}{@{}l}{\textit{Unified multi-task models}}\\
+UnifyImmun              & \NA & \NA & \NA & \NA &     &    \\
+UniPMT                  & \NA & \NA & \NA & \NA & \NA & \NA\\
+\method{} (joint)       & \NA & \NA & \NA & \NA & \NA & \NA\\
+\method{} (sequential)  & \NA & \NA & \NA & \NA & \NA & \NA\\
+\botrule
+\end{tabular*}
+\begin{tablenotes}%
+\item \NA{} marks a result that is pending. A blank cell marks a relation the
+method does not explicitly train a head for in the described setting. None of
+the transfer models has a peptide--TCR branch; UnifyImmun's specified loss
+supervises two pairwise heads, so a derived triple score would require a
+separately documented evaluation rule. Fusion-pMT's finetuned model reports
+only the triple task.
+\item $^{\dagger}$No public implementation at the time of writing (the authors
+state that code will be released upon publication), so this row may not be
+obtainable. $^{\ddagger}$Requires paired receptor $\alpha$/$\beta$ chains and
+predicted structures, which our corpus does not provide; evaluating it on our
+splits therefore needs a structure-prediction step and a single-chain
+restriction that departs from its published setting.
+\item Both metrics are threshold-free, so no decision threshold enters this
+table.
+\item \TODO{State for each baseline whether it was retrained on our splits or
+run as a released model. A released model was fitted on its own corpus, which
+may overlap our test entities, so a number obtained that way measures the
+published tool rather than the architecture.}
+\end{tablenotes}
+\end{table*}
+
+\TODO{Prose for Table~\ref{tab:main}, once filled. State the comparison
+protocol caveat plainly: external predictors were trained on their own corpora,
+so a difference in these columns mixes modelling and training-data effects.}
+
+\subsection{Generalisation to unseen entities}\label{sec:results:unseen}
+
+\begin{table*}[!t]
+\caption{Performance on the ten held-out benchmarks of
+Table~\ref{tab:scenarios}. Thresholds are the validation MCC-optimal values,
+frozen before evaluation.\label{tab:unseen}}
+\tabcolsep=0pt%
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}llccccc@{\extracolsep{\fill}}}
+\toprule
+Task & Benchmark & $N$ & AUROC $\uparrow$ & AUPRC $\uparrow$ & MCC $\uparrow$
+& F1 $\uparrow$\\
+\midrule
+\PH{}  & unseen peptide & \NA & \NA & \NA & \NA & \NA\\
+\PH{}  & unseen HLA     & \NA & \NA & \NA & \NA & \NA\\
+\PH{}  & unseen pair    & \NA & \NA & \NA & \NA & \NA\\
+\midrule
+\PT{}  & unseen peptide & \NA & \NA & \NA & \NA & \NA\\
+\PT{}  & unseen TCR     & \NA & \NA & \NA & \NA & \NA\\
+\PT{}  & unseen pair    & \NA & \NA & \NA & \NA & \NA\\
+\midrule
+\PHT{} & unseen peptide & \NA & \NA & \NA & \NA & \NA\\
+\PHT{} & unseen HLA     & \NA & \NA & \NA & \NA & \NA\\
+\PHT{} & unseen TCR     & \NA & \NA & \NA & \NA & \NA\\
+\PHT{} & unseen triple  & \NA & \NA & \NA & \NA & \NA\\
+\botrule
+\end{tabular*}
+\begin{tablenotes}%
+\item Unseen-pair and unseen-triple are combination splits and are not
+strictly cold at the level of individual entities.
+\item A small number of receptors in the two unseen-TCR benchmarks appear in
+some task's training pool --- five in the \PT{} file and four in the \PHT{}
+file on the raw corpus --- so strict cross-task cold-receptor performance
+cannot be claimed from those two files. \TODO{replace these two counts with the
+\texttt{cold\_audit} figures emitted by the reported run, since they depend on
+the data copy.}
+\end{tablenotes}
+\end{table*}
+
+\begin{figure}[!t]
+\centering
+\figph{5cm}{Figure placeholder. ROC and precision--recall curves per task,
+one panel per relation, with one line per held-out scenario.}
+\caption{\TODO{ROC/PR caption}}\label{fig:roc}
+\figalttext[ROC and precision-recall curves per task]{\TODO{alt text}}%
+\end{figure}
+
+\TODO{Prose for Table~\ref{tab:unseen} and Figure~\ref{fig:roc}.}
+
+\subsection{Behaviour across the four label classes}\label{sec:results:classes}
+
+\begin{table}[!t]
+\caption{Per-class behaviour on the \PHT{} benchmarks at the frozen threshold:
+recall on the positive class and false-positive rate on each negative class.%
+\label{tab:classes}}
+\begin{tabular*}{\columnwidth}{@{\extracolsep\fill}lcccc@{\extracolsep\fill}}
+\toprule
+& \texttt{111} & \texttt{000} & \texttt{100} & \texttt{010}\\
+Benchmark & recall $\uparrow$ & FPR $\downarrow$ & FPR $\downarrow$
+& FPR $\downarrow$\\
+\midrule
+unseen peptide & \NA & \NA & \NA & \NA\\
+unseen HLA     & \NA & \NA & \NA & \NA\\
+unseen TCR     & \NA & \NA & \NA & \NA\\
+unseen triple  & \NA & \NA & \NA & \NA\\
+\botrule
+\end{tabular*}
+\begin{tablenotes}%
+\item \texttt{100} and \texttt{010} test false positives when one pair label
+is negative. They can expose reliance on only one pair, but cannot distinguish
+triple reasoning from conjunction of both pair labels. Report class counts
+with each rate; small denominators limit interpretation.
+\end{tablenotes}
+\end{table}
+
+\TODO{Compare class-specific false positives with $s_{\min}$ and
+$s_{\mathrm{prod}}$, alongside recall on \texttt{111}. Neither these classes
+nor a gain over estimated pair scores substitutes for verified \texttt{110}
+examples.}
+
+\subsection{Effect of the consistency objective}\label{sec:results:consistency}
+
+\begin{table}[!t]
+\caption{Score-gap diagnostics for the full consistency objective on the \PHT{}
+test set. A violation is $\hat y_{\PHTm}-\hat y_{\text{pair}}-m>0$, a
+numerical diagnostic rather than a biological contradiction.
+\label{tab:consistency-results}}
+\begin{tabular*}{\columnwidth}{@{\extracolsep\fill}llcc@{\extracolsep\fill}}
+\toprule
+Coupling & Scope & Violation rate $\downarrow$ & Mean excess $\downarrow$\\
+\midrule
+$\mathcal{L}_{\mathrm{H}}$ & all        & \NA & \NA\\
+$\mathcal{L}_{\mathrm{H}}$ & applicable & \NA & \NA\\
+$\mathcal{L}_{\mathrm{T}}$ & all        & \NA & \NA\\
+$\mathcal{L}_{\mathrm{T}}$ & applicable & \NA & \NA\\
+\botrule
+\end{tabular*}
+\begin{tablenotes}%
+\item ``Applicable'' uses complete-label classes \texttt{111}/\texttt{000}/\texttt{010}
+for the PH coupling and \texttt{111}/\texttt{000}/\texttt{100} for the PT
+coupling, including rows whose gaps are within the margin. ``All'' uses every
+evaluated triple. Report denominators; mean excess is the mean of the positive
+part of the gap, including zeros, over the stated scope. Repeat this report
+for the comparator rows in Table~\ref{tab:ablation2}.
+\item Report AUROC, AUPRC, Brier and ECE alongside these rows, so that a drop
+in violations is not mistaken for a globally depressed triple score.
+\end{tablenotes}
+\end{table}
+
+The consistency objective is evaluated as an additional training preference,
+not as enforcement of a probability law. Its results are currently \NA{};
+the confirmed PT/PHT transfer gains do not establish a consistency benefit.
+For each method, report both the frequency and magnitude of score gaps on the
+eligible label groups. The all-row statistic is a separate diagnostic: some
+rows are deliberately outside a coupling's training mask, and differences
+between conditioning inputs can justify score-order differences.
+
+Compare the full objective with no consistency, a symmetric masked hinge,
+label-agnostic coupling, and the hard projection of
+Eq.~\eqref{eq:hard-projection}. Keep the MoE, transfer path and auxiliary BCE
+unchanged so that this comparison addresses score coupling. Report AUROC and
+AUPRC for all three tasks, Brier score and ECE, recall on \texttt{111}, and
+triple false-positive rates on the negative classes. Lower violations alone
+can result from suppressing all triple scores. Hard projection achieves zero
+positive excess by construction, so predictive and calibration metrics are
+necessary to assess its cost or benefit; it cannot be judged by violation rate
+alone. With task-specific decision thresholds, numerical ordering also need
+not ensure agreement between thresholded decisions.
+
+\TODO{Populate the comparison with \NA{} replaced by verified measurements.
+Distinguish measured score-gap reduction from changes in ranking, calibration
+and classwise errors; do not claim an advantage over hard projection before
+those comparisons are available.}
+
+\subsection{Ablation study}\label{sec:results:ablation}
+
+We organise the ablation around a single rule: every qualifier in the
+contribution list of Section~\ref{sec:intro} gets one variant that removes
+exactly that qualifier and nothing else. Table~\ref{tab:ablation} covers the
+sharing decomposition and its placement, together with the controls that ask
+whether joint supervision and an explicit triple head improve prediction
+on the observed support (contribution~1);
+Table~\ref{tab:ablation2} covers the transfer and the consistency objective.
+Table~\ref{tab:app:sensitivity} in Appendix~\ref{sec:app:results} reports the
+design choices that are not claim-bearing.
+
+\begin{table*}[!t]
+\caption{Ablation of the shared--private decomposition and its placement
+(contribution~2), with controls for the predictive value of the unified
+three-relation setting (contribution~1).\label{tab:ablation}}
+\tabcolsep=0pt%
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}lccccc@{\extracolsep{\fill}}}
+\toprule
+& \PH{} & \PT{} & \PHT{} & \PHT{} on \texttt{100}
+& \PHT{} on \texttt{010}\\
+Variant & AUPRC $\uparrow$ & AUPRC $\uparrow$ & AUPRC $\uparrow$
+& FPR $\downarrow$ & FPR $\downarrow$\\
+\midrule
+Full model                             & \NA & \NA & \NA & \NA & \NA\\
+\midrule
+\multicolumn{6}{@{}l}{\textit{Contribution 1: what does joint three-relation learning add?}}\\
+\PH{} only, single relation            & \NA &     &     &     &     \\
+\PT{} only, single relation            &     & \NA &     &     &     \\
+\PHT{} only, no pair heads             &     &     & \NA & \NA & \NA\\
+$s_{\min}$ from our own pair heads$^{\ddagger}$
+                                       &     &     & \NA & \NA & \NA\\
+$s_{\mathrm{prod}}$ from our own pair heads$^{\ddagger}$
+                                       &     &     & \NA & \NA & \NA\\
+\midrule
+\multicolumn{6}{@{}l}{\textit{Contribution 2: is the decomposition right?}}\\
+Plain FFN sublayer, matched parameters & \NA & \NA & \NA & \NA & \NA\\
+All-shared experts ($4+0$)             & \NA & \NA & \NA & \NA & \NA\\
+Private-only experts ($0+4$)           & \NA & \NA & \NA & \NA & \NA\\
+All-shared, matched total parameters   & \NA & \NA & \NA & \NA & \NA\\
+Private-only, matched total parameters & \NA & \NA & \NA & \NA & \NA\\
+Uniform (non-learned) gate             & \NA & \NA & \NA & \NA & \NA\\
+Gate on entity summaries only          & \NA & \NA & \NA & \NA & \NA\\
+Gate on peptide summary only           & \NA & \NA & \NA & \NA & \NA\\
+\midrule
+\multicolumn{6}{@{}l}{\textit{Contribution 2: is the placement right?}}\\
+Experts after pooling                  & \NA & \NA & \NA & \NA & \NA\\
+Triple reads pre-expert $U_{\PHm}$     & \NA & \NA & \NA & \NA & \NA\\
+Shared pool over $\{\PHm,\PTm\}$ only  & \NA & \NA & \NA & \NA & \NA\\
+Shared pool over $\{\PHm,\PHTm\}$ only & \NA & \NA & \NA & \NA & \NA\\
+Shared pool over $\{\PTm,\PHTm\}$ only & \NA & \NA & \NA & \NA & \NA\\
+\botrule
+\end{tabular*}
+\begin{tablenotes}%
+\item Every cell is the mean over seeds 42, 3407 and 2026 with its standard
+deviation; a single-seed row is never comparable to another at the effect sizes
+at stake here. A blank cell marks a relation the variant does not define.
+\item The last two columns report triple false-positive rates on
+\texttt{100} and \texttt{010}, using each model's threshold selected on the
+full validation set and frozen before testing. Both classes have negative
+\PHT{} labels, so AUPRC on either one against \texttt{000} would not be a
+meaningful classification measure. Report denominators with the rates: the
+raw test split contains only four \texttt{100} rows and 331 \texttt{010} rows.
+These columns test rejection when one pair condition fails, not recognition
+beyond conjunction. Interpret them alongside positive-class recall to avoid
+rewarding uniformly low triple scores.
+\item $^{\ddagger}$Computed post hoc from the full model's own \PH{} and \PT{}
+outputs, so these two rows involve no training. Together with the
+\PHT{}-only row they are the fair answer to whether the triple branch adds
+anything beyond combining its own pair predictions, which
+Section~\ref{sec:discussion} identifies as the sharpest question this corpus
+permits.
+\item The three single-relation rows cannot use the model-selection rule of
+Section~\ref{sec:method:data}, which averages three validation AUPRC
+values; they select on their own relation's validation AUPRC. All other rows
+use the unchanged rule, and no row changes the epoch budget or the
+early-stopping criterion.
+\item The $4+0$ and $0+4$ controls keep four active experts per branch,
+not the total parameter count: the full model has eight unique experts, the
+all-shared model four and the private-only model twelve. The additional
+parameter-matched rows adjust expert widths and must report actual trainable
+parameter counts. Only those matched controls support attribution beyond
+added capacity.
+\item ``Gate on entity summaries only'' drops the interaction term
+$\bar U_r$ from Eq.~\eqref{eq:context} and leaves the entity means, which is
+the gate-input condition of the multi-task originals
+(Section~\ref{sec:related:moe}); ``gate on peptide summary only'' additionally
+drops the receptor, and so also removes the gate's access to the relation.
+\item The three restricted-pool rows test sharing across relations with
+different input compositions. If gains occur only for $\{\PHm,\PHTm\}$,
+which both receive HLA, evidence for sharing between the HLA-conditioned and
+HLA-unspecified relations is limited. Such a result does not by itself reveal
+which biological features the experts represent.
+\end{tablenotes}
+\end{table*}
+
+\TODO{Prose for Table~\ref{tab:ablation}. Evaluate contribution~2 using
+both task performance and interference diagnostics. On fixed complete-label
+batches, compute pairwise cosine similarity between gradients of the native
+supervised task losses on the same shared parameter subset; report encoders
+and shared experts separately. A negative cosine indicates a locally
+conflicting update direction, not inevitable performance degradation. Compare
+with matched sharing controls and report joint-minus-single-task performance.
+Until these measurements exist, describe mitigation as the design aim rather
+than an achieved result.}
+
+\begin{table*}[!t]
+\caption{Ablation of the gated residue-level transfer and supervision feedback
+(contribution~3), the
+label-aware consistency objective (contribution~4) and the auxiliary
+supervision. Metric columns and the intended reporting protocol follow
+Table~\ref{tab:ablation}.\label{tab:ablation2}}
+\tabcolsep=0pt%
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}lccccc@{\extracolsep{\fill}}}
+\toprule
+& \PH{} & \PT{} & \PHT{} & \PHT{} on \texttt{100}
+& \PHT{} on \texttt{010}\\
+Variant & AUPRC $\uparrow$ & AUPRC $\uparrow$ & AUPRC $\uparrow$
+& FPR $\downarrow$ & FPR $\downarrow$\\
+\midrule
+Full model                             & \NA & \NA & \NA & \NA & \NA\\
+\midrule
+\multicolumn{6}{@{}l}{\textit{Contribution 3: which property of the transfer
+matters?}}\\
+w/o gated transfer, path removed$^{\S}$ & \NA & \NA & \NA & \NA & \NA\\
+Gated transfer, detached PT features    & \NA & \NA & \NA & \NA & \NA\\
+Ungated transfer, $\beta\equiv1$       & \NA & \NA & \NA & \NA & \NA\\
+Scalar $\beta$, one per sample         & \NA & \NA & \NA & \NA & \NA\\
+$\beta$ without explicit HLA summary   & \NA & \NA & \NA & \NA & \NA\\
+Transfer of pre-expert $U_{\PTm}$      & \NA & \NA & \NA & \NA & \NA\\
+Pooled-vector fusion instead           & \NA & \NA & \NA & \NA & \NA\\
+\midrule
+\multicolumn{6}{@{}l}{\textit{Contribution 4: which property of the objective
+matters?}}\\
+w/o consistency terms                  & \NA & \NA & \NA & \NA & \NA\\
+Hierarchy term only, $\lambda_{\mathrm{T}}=0$
+                                       & \NA & \NA & \NA & \NA & \NA\\
+\PT{}-implication only, $\lambda_{\mathrm{H}}=0$
+                                       & \NA & \NA & \NA & \NA & \NA\\
+Label-agnostic consistency             & \NA & \NA & \NA & \NA & \NA\\
+Symmetric hinge, no stop-gradient      & \NA & \NA & \NA & \NA & \NA\\
+Hard $\min$ constraint during training & \NA & \NA & \NA & \NA & \NA\\
+Hard $\min$ at inference only$^{\ddagger}$ & \NA & \NA & \NA & \NA & \NA\\
+\midrule
+\multicolumn{6}{@{}l}{\textit{Auxiliary supervision on triple rows}}\\
+w/o auxiliary pair supervision         & \NA & \NA & \NA & \NA & \NA\\
+Auxiliary \PH{} only                   & \NA & \NA & \NA & \NA & \NA\\
+Auxiliary \PT{} only                   & \NA & \NA & \NA & \NA & \NA\\
+\botrule
+\end{tabular*}
+\begin{tablenotes}%
+\item Numerical values are \NA{} pending integration of the server-side
+results. The confirmed conclusion concerns the improvement in both \PT{}
+and \PHT{} from adding gated transfer. Other rows define diagnostic controls;
+their presence does not assert that those experiments have been completed.
+Record the actual evaluation protocol and seed counts with the results.
+\item Detached transfer uses $\sg[Z_{\PTm}]$ in both the gate input and the
+residual projection. It preserves the forward computation at fixed parameters
+but blocks both terms of Eq.~\eqref{eq:transfer-feedback}. The \PT{} head
+still uses the original, non-detached representation for its own supervision.
+Shared encoders and experts may still receive triple gradients through other
+paths, so this control isolates feedback through the added connection only.
+\item The first block separates the four qualifiers of contribution~3, which a
+single row removing the whole path cannot do. $\beta\equiv1$ tests whether the
+transfer has to be \emph{gated}; a scalar $\beta$ keeps the gate but removes
+its residue resolution, which is what ``residue-level'' means; dropping
+$\bar H_H$ from Eq.~\eqref{eq:beta} tests the added value of an explicit HLA
+summary. This control still receives HLA information through the triple state,
+so it is not HLA-independent. The
+pooled-vector row replaces the residue injection with a pooled \PT{} feature
+concatenated at the triple classifier. This is a control for retaining the
+residue axis, not a reproduction of Fusion-pMT, which already transfers
+unpooled \PH{} features.
+\item $^{\S}$Disabling the transfer leaves its parameters registered but
+unused, so this row is not matched in active parameters. The $\beta\equiv1$
+control retains the same feature projection $R$ but removes learned gating;
+the gate network is then inactive, which must be reflected in active-parameter
+counts. The detached-transfer control retains all forward modules.
+\item ``Label-agnostic consistency'' uses the fixed-direction penalty
+$\phi(\hat y_{\PHTm},\sg[\hat y_{\PHm}])+
+\phi(\hat y_{\PHTm},\sg[\hat y_{\PTm}])$ on every complete-label row,
+with the respective $\lambda_{\mathrm{H}}$ and $\lambda_{\mathrm{T}}$
+weights, margin and ramp unchanged.
+It always corrects the triple downward when a gap occurs, removing both the
+class masks and the label-dependent choice of correction target. It does not
+isolate masking alone. The symmetric-hinge row retains the original class
+masks and weights but removes stop-gradient, isolating the effect of letting
+both operands receive direct gradients.
+\item The hard-$\min$ controls use $q_{\PHTm}$ from
+Eq.~\eqref{eq:hard-projection}, which includes the raw triple score and is
+not the pair-only baseline $s_{\min}$. The training variant replaces the raw
+triple score by $q_{\PHTm}$ in the native triple BCE and omits soft consistency;
+pair and auxiliary supervision remain unchanged. At inference it also uses
+$q_{\PHTm}$. $^{\ddagger}$The inference-only variant post-processes the full
+model without retraining. These answer different questions: constrained
+learning versus clipping an already trained predictor.
+\item Separating the two consistency terms matters because they are weighted
+independently in Eq.~\eqref{eq:total} and act on different label classes:
+$\mathcal{L}_{\mathrm{H}}$ is active on \texttt{111}, \texttt{000} and
+\texttt{010}; $\mathcal{L}_{\mathrm{T}}$ on \texttt{111}, \texttt{000} and
+\texttt{100}.
+\item Report AUROC, Brier and ECE for every row of the last two blocks
+alongside AUPRC, so that a reduction in violation rate is not mistaken for an
+improvement in ranking or calibration.
+\end{tablenotes}
+\end{table*}
+
+\paragraph{Gated transfer improves both PT and PHT.}
+Adding the HLA-conditioned gated connection improves prediction performance
+for both \PT{} and \PHT{} relative to removing that connection. The
+improvement is therefore not confined to the receiving triple task: the
+source pair task also benefits when its representation participates in the
+triple computation. The \PHT{} gain supports using independently supervised
+recognition features alongside \PH{} features, while the \PT{} gain is
+consistent with the additional representation-training path described in
+Eq.~\eqref{eq:transfer-feedback}. Numerical results are \NA{} in
+Table~\ref{tab:ablation2} pending transfer of the server-side measurements.
+
+The comparison establishes the benefit of the complete gated connection; it
+does not isolate each mechanism. Comparing the full connection with detached
+transfer tests the contribution of its backward feedback, while comparison
+with $\beta\equiv1$ tests conditional gating against unconditional projected
+feature transfer. Removing the explicit HLA summary from the gate tests its
+incremental value beyond the HLA information already present in the triple
+state. These controls should keep task data, auxiliary pair losses,
+consistency terms, training budgets and model-selection rules unchanged.
+In particular, the effect of the added feature path should not be conflated
+with \PT{} auxiliary BCE or label-aware consistency, which provide separate
+supervision routes.
+
+\TODO{Insert effect sizes and run metadata for the completed transfer
+comparison. Report the diagnostic controls only after their results are
+available; do not infer significance or a feedback-specific gain from the
+qualitative full-connection ablation. Complete the consistency ablation
+discussion separately.}
+
+\TODO{Implementation status. Check which diagnostic variants are implemented
+in the server-side experiment code before reporting them. Required controls
+include detached PT features at both fusion inputs. In the current local
+design, expert counts
+and the shared pool's membership are fixed in the model, there is no
+gate-override or gate-context switch, no post-pooling expert variant, no
+pre-expert triple path, no $\beta$ override, no label-agnostic or hard-$\min$
+consistency mode, and no single-relation training mode (the three task weights
+are validated as strictly positive). Add them as default-off switches on the
+\texttt{stage\_final} subclasses so that no finished stage changes behaviour.
+Each switch belongs to the resume contract, so every variant needs its own
+configuration file and trains from scratch.}
+
+\subsection{Routing and transfer-gate analysis}\label{sec:results:routing}
+
+\begin{table}[!t]
+\caption{Learned allocation between shared and branch-private experts, and
+transfer-gate statistics, on the \PHT{} test set. $\alpha_r$ is the shared
+fraction $g_{r,1}+g_{r,2}$.\label{tab:routing}}
+\begin{tabular*}{\columnwidth}{@{\extracolsep\fill}lccc@{\extracolsep\fill}}
+\toprule
+Relation & $\alpha_r$ & Gate entropy & \TODO{units}\\
+\midrule
+\PH{}  & \NA & \NA & \NA\\
+\PT{}  & \NA & \NA & \NA\\
+\PHT{} & \NA & \NA & \NA\\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Transfer gate $\beta$ over real peptide residues}}\\
+mean / s.d.          & \NA & \NA & \\
+fraction $<0.05$     & \NA &     & \\
+fraction $>0.95$     & \NA &     & \\
+\botrule
+\end{tabular*}
+\begin{tablenotes}%
+\item The gate bias starts at $-2$, corresponding to $\sigma(-2)\approx0.12$
+before the input-dependent logit contribution. Compare the measured initial
+and final gate distributions to assess how training changes transfer.
+\item The routing regulariser is disabled in all reported runs, so $\alpha_r$
+reflects learning and not a uniformity penalty.
+\end{tablenotes}
+\end{table}
+
+\begin{figure}[!t]
+\centering
+\figph{4.6cm}{Figure placeholder. Left: shared fraction $\alpha_r$ per
+relation over training epochs. Right: distribution of the per-residue transfer
+gate $\beta$, by peptide position and by HLA supertype.}
+\caption{\TODO{routing and gate caption}}\label{fig:gates}
+\figalttext[Expert routing and transfer-gate statistics]{\TODO{alt text}}%
+\end{figure}
+
+\TODO{Report the empirical tests of contribution~2: variation in $\alpha_r$
+between relations and across samples, and performance under matched shared-only,
+private-only and fixed-gate controls. These statistics describe allocation of
+transformations, not biological contributions. If routing is nearly constant,
+state that sample-adaptive allocation is unsupported; distinguish a useful
+fixed mixture from a pure capacity gain using the controls, rather than
+inferring either from gate values alone. Analyse $\beta$ separately, as a
+per-residue transfer gate, and do not interpret it as a physical contact map
+without independent structural evidence.}
+
+\subsection{Joint versus sequential training}\label{sec:results:modes}
+
+\TODO{Prose and a small table or figure. State that the two modes give the
+tasks different numbers of updates, and that the triple task is last in every
+sequential round, so a sequential advantage on \PHT{} may partly reflect
+recency.}
+
+\subsection{Computational cost}\label{sec:results:cost}
+
+\TODO{Report trainable parameter count, expert parameter count, peak GPU
+memory, optimiser steps and samples per second from \texttt{history.json}.
+State that the language models are excluded from these numbers because they
+are not in the training graph, and report the one-off embedding precomputation
+cost separately.}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Discussion}\label{sec:discussion}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+The first two contributions address different questions. The unified task
+formulation specifies which predictions are available and which molecular
+inputs each can use. The MoE specifies how those tasks share interaction
+capacity. UniPMT already establishes the value of considering all three
+relations in one framework; our design instead gives each relation a direct
+sequence branch and makes the \PT{} representation available for
+HLA-conditioned residue-level transfer. UnifyImmun and Fusion-pMT motivate
+useful sharing and transfer paths, but their published training schemes do not
+establish the behaviour of three objectives kept active together. Our
+shared--private design addresses that joint setting without assuming that
+those earlier architectures have been shown to fail.
+
+The transfer ablation shows that the added gate improves both \PT{} and
+\PHT{}, supporting a benefit for the source as well as the receiving task.
+For \PHT{}, the connection complements presentation-derived features with
+interaction features learned under independent \PT{} supervision, extending
+the PH-to-triple transfer used by Fusion-pMT. For \PT{}, the differentiable
+path lets the triple objective shape the representation consumed by its own
+classifier. The HLA-conditioned gate provides flexibility in using that
+representation when the pair and triple labels differ, as in \texttt{010}.
+This is a representation-level training interaction: the triple BCE does not
+directly train the PT classifier through the transfer edge, and PT inference
+does not acquire an HLA input.
+
+These paths offer a mechanistic account of the observed gains, but the
+full-connection ablation alone does not separate their contributions. A
+detached-transfer control is needed to attribute a gain specifically to
+backward feedback, and an ungated control to attribute it to conditional
+gating. Moreover, the additional objective need not supply independent
+biological information when the labels obey pairwise conjunction; it can
+still shape a shared representation usefully. The improvement of both tasks
+therefore supports the gated connection without establishing that every
+feedback gradient is beneficial or that the missing \texttt{110} distinction
+has been learned.
+
+Consistency addresses a third issue beyond shared capacity and feature
+transfer: how to correct disagreements among the output scores. A shared
+expert can improve features without resolving a pair--triple score gap, and
+the transfer gate can improve both tasks without specifying which output
+should change when their scores differ. The label-aware objective makes that
+choice explicit. For positive triples it uses the triple score to raise a
+lagging positive pair; for negative pair--triple labels it uses the pair score
+to lower the triple. Unlike a symmetric penalty, each term has only one
+active score operand. Unlike hard clipping, it uses labels during training
+to choose the correction and leaves inference scores unconstrained.
+
+This flexibility is useful because the three predictions condition on
+different molecular inputs. It avoids treating the pair-score bound as a
+universal probability law, while still using the annotated relationships as
+a training preference. The margin and loss weights allow the model to retain
+score differences when demanded by its classification objectives. The price
+is that exact hierarchy is not guaranteed, and label-aligned direct
+derivatives need not translate into conflict-free shared-parameter updates.
+Consistency benefits therefore require their own comparisons: neither the
+transfer ablation nor routing statistics establish them. The relevant
+question is whether coupling reduces label-applicable score gaps while
+preserving or improving prediction and calibration; those numerical results
+remain \NA{}.
+
+The rationale for a separate triple task is to avoid equating a regularity in
+the available labels with a universal recognition rule. Two positive pair
+predictions need not establish recognition under the specified HLA. Learning
+a triple decision from all three entities leaves this distinction expressible,
+whereas defining that decision as pairwise conjunction rules it out by design.
+The triple head thus removes a structural restriction; it does not by itself
+correct the preference supported by the observed label distribution.
+
+The absent \texttt{110} class sets the boundary of what the present evaluation
+can establish. The \texttt{111} rows fit both an explicit triple predictor and
+a conjunction rule; \texttt{100} and \texttt{010} test failure of one pair
+condition, which that rule also represents. Improvements over minimum or
+product combinations of predicted scores would therefore support predictive
+utility on the observed distribution, not prove that the model has learned
+HLA-specific exceptions to pairwise positivity. A decisive extension would
+collect verified triple negatives with positive pair evidence and a documented
+HLA context, rather than equating randomly recombined triples with confirmed
+\texttt{110} examples. It would also require updating the current four-class
+reader and loss contract before retraining and evaluation.
+
+\TODO{Add the quantitative transfer results and the remaining result-dependent
+discussion: comparison with single-task learning, matched expert-sharing
+controls, interference diagnostics, and ranking/calibration under consistency.
+The confirmed PT/PHT transfer gains do not establish these other outcomes.}
+
+\begin{boxtext}[Limitations]
+\begin{unlist}
+\item \textbf{Missing evidence for non-conjunctive triple decisions.} No
+complete triple-labelled row has class \texttt{110}, and the current reader
+and loss reject it. Thus the available labels obey
+Eq.~\eqref{eq:observed-conjunction}; the evaluation cannot establish that a
+separate triple decision is indispensable. Pair-score composition controls
+measure predictive value under this restriction, while verified \texttt{110}
+cases and an extended training contract are required to test the broader task.
+\item \textbf{Consistency is a soft prior, not a guaranteed hierarchy.}
+The class masks and stop-gradient align the penalty's direct correction with
+its target label. They neither certify the reference score nor freeze its
+branch, and they guarantee neither calibrated probabilities nor consistent
+thresholded predictions. Performance relative to hard projection remains
+\NA{} pending the dedicated comparison.
+\item \textbf{Selective sharing does not isolate gradients.} Shared modules
+still receive all task gradients, and the triple loss also reaches pair-private
+experts through the transfer paths. The MoE is a capacity-allocation mechanism;
+reduced interference and gains over single-task learning require measurement.
+\item \textbf{Sparse diagnostic negatives.} The raw test split has only four
+\texttt{100} rows, so one error changes its false-positive rate by 25 percentage
+points. Report class counts and uncertainty, and avoid drawing conclusions
+about triple-specific recognition from this subset.
+
+\item \textbf{The expert mixture is dense and the routing is sample-level.}
+All four experts are evaluated for every sample, so we make no efficiency claim
+against sparse expert layers, and the gate is computed once per sample, so the
+routing is not residue-level even though expert computation is.
+\item \textbf{Routing uniformity is not an active mechanism.} The balance
+regulariser is available but disabled in all reported runs, so the observed
+expert allocation must not be attributed to it.
+\item \textbf{Transfer gains and joint-training gains are different comparisons.}
+The gated-connection ablation establishes improvement in \PT{} and \PHT{}
+within the joint model; it does not establish improvement over training each
+task alone. The three
+single-relation rows of Table~\ref{tab:ablation} are what licenses any
+statement about the unified setting, and they require a training mode that
+restricts the active task set, since zeroing a task weight would still let the
+other tasks' gradients reach the shared modules. Absent a gain on those rows we
+claim only that the three relations can be served by one model, not that they
+improve one another.
+\item \textbf{Train and evaluation class priors differ.} The triple training
+set is balanced across the four label classes, which makes its aggregate
+positive-to-negative ratio 1:3, while triple validation and test are balanced
+1:1. The loss applies no re-weighting, and this prior shift interacts with the
+MCC-selected threshold, so all threshold-dependent metrics should be read with
+that in mind.
+\item \textbf{Auxiliary supervision is projected, not additional.} The \PH{}
+and \PT{} auxiliary terms reuse labels attached to triple rows. The audit of
+Section~\ref{sec:method:data} exists because those pairs can otherwise appear
+in the binary held-out sets, and on the uncleaned corpus they do; every
+reported model is trained on a cleaned copy.
+\item \textbf{Mechanisms are not co-timed.} Auxiliary supervision is active
+from the first epoch while the consistency terms ramp in from epoch four to
+epoch eight, so attributing a gain to one rather than the other requires the
+ablations of Table~\ref{tab:ablation} and not the training curves alone.
+\item \textbf{No external validation cohort.} All evaluation uses held-out
+splits of a single curated corpus. \TODO{state whether an independent
+external cohort was obtained; if not, say so here plainly.}
+\end{unlist}
+\end{boxtext}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Conclusion}\label{sec:conclusion}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+We presented \method{}, a sequence-based model that jointly serves \PH{},
+\PT{} and \PHT{} while respecting their different molecular inputs. The
+separate triple head avoids imposing pairwise conjunction as a fixed decision
+rule and permits recognition to depend on the specified HLA context. Its
+unification differs from UniPMT through direct relation branches, including a
+\PT{} representation that does not require averaging over candidate HLA
+molecules. Its second contribution adapts shared--private experts to the
+interaction blocks, allowing sample-dependent reuse of transformations while
+preserving peptide positions for the triple branch. HLA-conditioned \PT{}
+transfer complements the PH-derived triple representation with independently
+supervised recognition features and returns triple gradients to the PT feature
+extractor. The transfer ablation shows improved prediction for both tasks.
+Label-aware directional consistency supplies the complementary output-level
+objective: it chooses a label-supported correction target for a pair--triple
+score gap, rather than enforcing a hard bound on every triple prediction.
+MoE allocates transformations, gated transfer exchanges features and their
+supervision, and consistency couples scores. Its predictive and calibration
+benefits, as well as the individual roles of transfer, feedback and gating,
+require their respective controls.
+The absence of \texttt{110} supervision remains a concrete limitation:
+verified examples of positive pairs with a negative specified triple, together
+with an extended data/loss contract, are needed to test recognition beyond
+pair-label conjunction.
+\TODO{Insert the transfer effect sizes, currently \NA{}, and other
+quantitative conclusions supported by the completed experiments.}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Back matter
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section*{Conflicts of interest}
+The authors declare that they have no competing interests.
+
+\section*{Funding}
+\TODO{funding statement, with grant numbers}
+
+\section*{Data availability}
+\TODO{Data availability statement. Name the repository and identifier for the
+curated corpus, and state that the split audit report and the cleaned-copy
+fingerprint are released alongside the code so that the splits can be
+reproduced exactly.}
+
+\section*{Author contributions statement}
+\TODO{contributions by author initials}
+
+\section*{Acknowledgments}
+\TODO{acknowledgments}
+
+\bibliographystyle{oup-abbrvnat}
+\bibliography{references}
+
+%% Author biographies are required by some OUP journals (for example Briefings
+%% in Bioinformatics) and not by Bioinformatics. Delete if not required.
+%\begin{biography}{{\color{black!20}\rule{77pt}{57pt}}}{%
+%\author{Name.} \TODO{biography}}
+%\end{biography}
+
+\begin{appendices}
+
+\section{Hyper-parameters}\label{sec:app:impl}
+
+\begin{table}[!t]
+\caption{Complete hyper-parameter settings. Values marked \NA{} are read from
+the released configuration file.\label{tab:hparams}}
+\begin{tabular*}{\columnwidth}%
+{@{\extracolsep\fill}p{0.56\columnwidth}r@{\extracolsep\fill}}
+\toprule
+Hyper-parameter & Value\\
+\midrule
+\multicolumn{2}{@{}l}{\textit{Representation}}\\
+Peptide/HLA language model (frozen) & ESM-C 300M\\
+TCR language model (frozen)         & TCR-BERT\\
+Cached embedding dtype              & \texttt{float16}\\
+Peptide length range                & 8--15\\
+HLA / TCR maximum length            & 34 / 34\\
+\midrule
+\multicolumn{2}{@{}l}{\textit{Architecture}}\\
+Model width $\dmodel$               & 256\\
+Encoder layers / heads / FFN width  & 3 / 8 / 1024\\
+Shared experts / private experts per relation & 2 / 2\\
+Expert inner width                  & 512\\
+Router inner width                  & 128\\
+Transfer-gate inner width           & 128\\
+Transfer-gate bias initialisation   & $-2$\\
+Pooling / classifier inner width    & 128 / 128\\
+Dropout                             & 0.1\\
+\midrule
+\multicolumn{2}{@{}l}{\textit{Objective}}\\
+Task weights $w_{\PHm},w_{\PTm},w_{\PHTm}$ & 1.0, 1.0, 1.0\\
+Auxiliary weights $\lambda^{\mathrm{aux}}_{\PHm},
+\lambda^{\mathrm{aux}}_{\PTm}$   & 0.1, 0.1\\
+Consistency weights $\lambda_{\mathrm{H}},\lambda_{\mathrm{T}}$ & 0.05, 0.03\\
+Consistency margin $m$              & 0.05\\
+Ramp $E_{\mathrm{warm}}$ / $E_{\mathrm{ramp}}$ & 3 / 5\\
+Balance weight $\lambda_{\mathrm{bal}}$ & 0.0\\
+\midrule
+\multicolumn{2}{@{}l}{\textit{Optimisation}}\\
+Optimiser / weight decay            & AdamW / 0.01\\
+Learning rate, modules / gating & $2\times10^{-4}$ / $1\times10^{-4}$\\
+Warm-up fraction                    & 0.05\\
+Gradient clipping (global norm)     & 1.0\\
+Precision                           & \texttt{bfloat16} autocast\\
+Routing temperature $\tau$          & $2.0\rightarrow1.0$ over 5 epochs\\
+Batch size per task / evaluation    & 32 / 256\\
+Maximum epochs / patience           & 100 / 10\\
+Minimum improvement $\delta$        & $1\times10^{-4}$\\
+Selection metric                    & mean validation AUPRC\\
+Seeds                               & 42, 3407, 2026\\
+\botrule
+\end{tabular*}
+\end{table}
+
+\section{Additional results}\label{sec:app:results}
+
+\begin{figure}[!t]
+\centering
+\figph{4.6cm}{Appendix figure placeholder. Training and validation curves per
+task, with the consistency-ramp window and the temperature-annealing window
+marked.}
+\caption{\TODO{appendix figure caption}}\label{fig:app:curves}
+\figalttext[Training and validation curves per task]{\TODO{alt text}}%
+\end{figure}
+
+\begin{table}[!t]
+\caption{Sensitivity to design choices that no contribution claims. Single
+seed (42), since these rows are reported to show that the configuration of
+Section~\ref{sec:method:impl} is not a sensitive
+one.\label{tab:app:sensitivity}}
+\begin{tabular*}{\columnwidth}{@{\extracolsep\fill}p{0.38\columnwidth}ccc@{\extracolsep\fill}}
+\toprule
+Variant & \PH{} & \PT{} & \PHT{}\\
+ & AUPRC $\uparrow$ & AUPRC $\uparrow$ & AUPRC $\uparrow$\\
+\midrule
+Reported configuration             & \NA & \NA & \NA\\
+\midrule
+Experts $1+1$                      & \NA & \NA & \NA\\
+Experts $4+4$                      & \NA & \NA & \NA\\
+No temperature annealing, $\tau\equiv1$ & \NA & \NA & \NA\\
+Routing regulariser on, $\lambda_{\mathrm{bal}}>0$ & \NA & \NA & \NA\\
+No consistency ramp, $\gamma\equiv1$ & \NA & \NA & \NA\\
+Consistency margin $m=0$           & \NA & \NA & \NA\\
+Transfer-gate bias init $0$        & \NA & \NA & \NA\\
+Single learning rate for routers and gate & \NA & \NA & \NA\\
+One encoder layer instead of three & \NA & \NA & \NA\\
+\botrule
+\end{tabular*}
+\begin{tablenotes}%
+\item Every row here is reachable by configuration alone, which is why they
+are reported together and at one seed. The expert-count rows are the exception
+in spirit rather than in cost: they substantiate the statement in
+Section~\ref{sec:related:moe} that the two-plus-two split is a setting within a
+known scheme rather than a tuned novelty.
+\item The $\lambda_{\mathrm{bal}}>0$ row exists so that the routing analysis of
+Section~\ref{sec:results:routing} cannot be read as an artefact of a
+uniformity penalty that we did not use.
+\item The single-learning-rate row tests the stated reason for the second
+parameter group in Section~\ref{sec:method:impl}, that routers and the
+transfer gate control mixing rather than representation.
+\item Joint versus sequential training is a mode rather than an ablation and
+is reported in Section~\ref{sec:results:modes}.
+\end{tablenotes}
+\end{table}
+
+\begin{table}[!t]
+\caption{Per-component loss values over training, with their own
+denominators.\label{tab:app:loss}}
+\begin{tabular*}{\columnwidth}{@{\extracolsep\fill}p{0.43\columnwidth}p{0.20\columnwidth}p{0.25\columnwidth}@{\extracolsep\fill}}
+\toprule
+Component & Final value & Rows contributing\\
+\midrule
+\PH{} / \PT{} / \PHT{} supervised & \NA & \NA\\
+Auxiliary \PH{} / \PT{}           & \NA & \NA\\
+$\mathcal{L}_{\mathrm{H}}$ positive / negative & \NA & \NA\\
+$\mathcal{L}_{\mathrm{T}}$ positive / negative & \NA & \NA\\
+\botrule
+\end{tabular*}
+\begin{tablenotes}%
+\item Each component is averaged over the rows to which it applies, so the
+columns are not comparable as totals.
+\end{tablenotes}
+\end{table}
+
+\end{appendices}
+
+\end{document}

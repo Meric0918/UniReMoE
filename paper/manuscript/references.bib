@@ -1,0 +1,501 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% references.bib for the UniReMoE manuscript
+%%
+%% Every entry was verified against the Crossref metadata record for its DOI,
+%% or against the official proceedings page (PMLR / ACL Anthology / JMLR / ACM).
+%% Author lists are taken verbatim from those records.
+%%
+%% Two conventions matter for this bibliography style:
+%%  1. oup-abbrvnat applies BibTeX's "t" case change, which lowercases every
+%%     title word that is not brace-protected. All acronyms are therefore
+%%     wrapped in braces -- {HLA}, {TCR}, {MHC}, {NLP} and so on. Do not strip
+%%     those braces.
+%%  2. The file is deliberately pure ASCII: the document class loads no
+%%     inputenc/fontenc, so accents are written as LaTeX escapes
+%%     (T{\"u}reci, Mart{\'i}nez) rather than as UTF-8 bytes.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% ---------------------------------------------------------------- Background
+
+@article{rudolph2006structural,
+  author  = {Rudolph, Markus G. and Stanfield, Robyn L. and Wilson, Ian A.},
+  title   = {How {TCRs} bind {MHCs}, peptides, and coreceptors},
+  journal = {Annual Review of Immunology},
+  volume  = {24},
+  number  = {1},
+  pages   = {419--466},
+  year    = {2006},
+  doi     = {10.1146/annurev.immunol.23.021704.115658}
+}
+
+@article{schumacher2015neoantigens,
+  author  = {Schumacher, Ton N. and Schreiber, Robert D.},
+  title   = {Neoantigens in cancer immunotherapy},
+  journal = {Science},
+  volume  = {348},
+  number  = {6230},
+  pages   = {69--74},
+  year    = {2015},
+  doi     = {10.1126/science.aaa4971}
+}
+
+@article{sahin2018personalized,
+  author  = {Sahin, Ugur and T{\"u}reci, {\"O}zlem},
+  title   = {Personalized vaccines for cancer immunotherapy},
+  journal = {Science},
+  volume  = {359},
+  number  = {6382},
+  pages   = {1355--1360},
+  year    = {2018},
+  doi     = {10.1126/science.aar7112}
+}
+
+%% ------------------------------------------------- Peptide--HLA presentation
+
+@article{reynisson2020netmhcpan,
+  author  = {Reynisson, Birkir and Alvarez, Bruno and Paul, Sinu and
+             Peters, Bjoern and Nielsen, Morten},
+  title   = {{NetMHCpan-4.1} and {NetMHCIIpan-4.0}: improved predictions of
+             {MHC} antigen presentation by concurrent motif deconvolution and
+             integration of {MS} {MHC} eluted ligand data},
+  journal = {Nucleic Acids Research},
+  volume  = {48},
+  number  = {W1},
+  pages   = {W449--W454},
+  year    = {2020},
+  doi     = {10.1093/nar/gkaa379}
+}
+
+@article{odonnell2020mhcflurry,
+  author  = {O'Donnell, Timothy J. and Rubinsteyn, Alex and Laserson, Uri},
+  title   = {{MHCflurry} 2.0: improved pan-allele prediction of {MHC}
+             class {I}-presented peptides by incorporating antigen processing},
+  journal = {Cell Systems},
+  volume  = {11},
+  number  = {1},
+  pages   = {42--48.e7},
+  year    = {2020},
+  doi     = {10.1016/j.cels.2020.06.010}
+}
+
+@article{chu2022transphla,
+  author  = {Chu, Yanyi and Zhang, Yan and Wang, Qiankun and Zhang, Lingfeng
+             and Wang, Xuhong and Wang, Yanjing and
+             Salahub, Dennis Russell and Xu, Qin and Wang, Jianmin and
+             Jiang, Xue and Xiong, Yi and Wei, Dong-Qing},
+  title   = {A transformer-based model to predict peptide--{HLA} class {I}
+             binding and optimize mutated peptides for vaccine design},
+  journal = {Nature Machine Intelligence},
+  volume  = {4},
+  number  = {3},
+  pages   = {300--311},
+  year    = {2022},
+  doi     = {10.1038/s42256-022-00459-7}
+}
+
+%% -------------------------------------------------- Peptide--TCR recognition
+
+@article{dash2017quantifiable,
+  author  = {Dash, Pradyot and Fiore-Gartland, Andrew J. and Hertz, Tomer and
+             Wang, George C. and Sharma, Shalini and Souquette, Aisha and
+             Crawford, Jeremy Chase and Clemens, E. Bridie and
+             Nguyen, Thi H. O. and Kedzierska, Katherine and
+             La Gruta, Nicole L. and Bradley, Philip and Thomas, Paul G.},
+  title   = {Quantifiable predictive features define epitope-specific
+             {T} cell receptor repertoires},
+  journal = {Nature},
+  volume  = {547},
+  number  = {7661},
+  pages   = {89--93},
+  year    = {2017},
+  doi     = {10.1038/nature22383}
+}
+
+@article{glanville2017identifying,
+  author  = {Glanville, Jacob and Huang, Huang and Nau, Allison and
+             Hatton, Olivia and Wagar, Lisa E. and Rubelt, Florian and
+             Ji, Xuhuai and Han, Arnold and Krams, Sheri M. and
+             Pettus, Christina and Haas, Nikhil and
+             Lindestam Arlehamn, Cecilia S. and Sette, Alessandro and
+             Boyd, Scott D. and Scriba, Thomas J. and Martinez, Olivia M. and
+             Davis, Mark M.},
+  title   = {Identifying specificity groups in the {T} cell receptor
+             repertoire},
+  journal = {Nature},
+  volume  = {547},
+  number  = {7661},
+  pages   = {94--98},
+  year    = {2017},
+  doi     = {10.1038/nature22976}
+}
+
+@article{springer2020ergo,
+  author  = {Springer, Ido and Besser, Hanan and
+             Tickotsky-Moskovitz, Nili and Dvorkin, Shirit and
+             Louzoun, Yoram},
+  title   = {Prediction of specific {TCR}-peptide binding from large
+             dictionaries of {TCR}-peptide pairs},
+  journal = {Frontiers in Immunology},
+  volume  = {11},
+  pages   = {1803},
+  year    = {2020},
+  doi     = {10.3389/fimmu.2020.01803}
+}
+
+@article{lu2021pmtnet,
+  author  = {Lu, Tianshi and Zhang, Ze and Zhu, James and Wang, Yunguan and
+             Jiang, Peixin and Xiao, Xue and Bernatchez, Chantale and
+             Heymach, John V. and Gibbons, Don L. and Wang, Jun and
+             Xu, Lin and Reuben, Alexandre and Wang, Tao},
+  title   = {Deep learning-based prediction of the {T} cell
+             receptor--antigen binding specificity},
+  journal = {Nature Machine Intelligence},
+  volume  = {3},
+  number  = {10},
+  pages   = {864--875},
+  year    = {2021},
+  doi     = {10.1038/s42256-021-00383-2}
+}
+
+@article{weber2021titan,
+  author  = {Weber, Anna and Born, Jannis and
+             Rodriguez Mart{\'i}nez, Mar{\'i}a},
+  title   = {{TITAN}: {T}-cell receptor specificity prediction with bimodal
+             attention networks},
+  journal = {Bioinformatics},
+  volume  = {37},
+  number  = {Supplement\_1},
+  pages   = {i237--i244},
+  year    = {2021},
+  doi     = {10.1093/bioinformatics/btab294}
+}
+
+%% ----------------------------------------------- Unified multi-task families
+%% NOTE ON SCOPE, checked against the published abstracts:
+%%  - UnifyImmun (yu2025unifyimmun) predicts the TWO pairwise tasks
+%%    (peptide--HLA and peptide--TCR) with two cross-attention branches over a
+%%    shared peptide encoder and a two-phase progressive training strategy. It
+%%    does NOT have a three-way peptide--HLA--TCR head. Do not write that it
+%%    does.
+%%  - UniPMT (zhao2025unipmt) DOES perform P--M--T, P--M and P--T jointly, but
+%%    as a heterogeneous graph neural network over peptide/MHC/TCR nodes with
+%%    observed binding events as edges -- not by fusing pooled pairwise
+%%    branch vectors. Criticisms of pooled-vector fusion do not apply to it.
+%%    Eq. (11) averages P--M--T scores over MHC candidates for P--T;
+%%    Eq. (12) jointly optimises the three tasks. Its outputs are not independent.
+
+@article{yu2025unifyimmun,
+  author  = {Yu, Chenpeng and Fang, Xing and Tian, Shiye and Liu, Hui},
+  title   = {A unified cross-attention model for predicting antigen binding
+             specificity to both {HLA} and {TCR} molecules},
+  journal = {Nature Machine Intelligence},
+  volume  = {7},
+  number  = {2},
+  pages   = {278--292},
+  year    = {2025},
+  doi     = {10.1038/s42256-024-00973-w},
+  url     = {https://arxiv.org/html/2405.06653v2}
+}
+
+@article{zhao2025unipmt,
+  author  = {Zhao, Yunxiang and Yu, Jijun and Su, Yixin and Shu, You and
+             Ma, Enhao and Wang, Jing and Jiang, Shuyang and Wei, Congwen
+             and Li, Dongsheng and Huang, Zhen and Cheng, Gong and
+             Ren, Hongguang and Feng, Jiannan},
+  title   = {A unified deep framework for peptide--major histocompatibility
+             complex--{T} cell receptor binding prediction},
+  journal = {Nature Machine Intelligence},
+  volume  = {7},
+  number  = {4},
+  pages   = {650--660},
+  year    = {2025},
+  doi     = {10.1038/s42256-025-01002-0},
+  url     = {https://d-nb.info/137009602X/34}
+}
+
+%% --------------------------------------------------- Protein language models
+
+@article{rives2021esm,
+  author  = {Rives, Alexander and Meier, Joshua and Sercu, Tom and
+             Goyal, Siddharth and Lin, Zeming and Liu, Jason and Guo, Demi
+             and Ott, Myle and Zitnick, C. Lawrence and Ma, Jerry and
+             Fergus, Rob},
+  title   = {Biological structure and function emerge from scaling
+             unsupervised learning to 250 million protein sequences},
+  journal = {Proceedings of the National Academy of Sciences},
+  volume  = {118},
+  number  = {15},
+  pages   = {e2016239118},
+  year    = {2021},
+  doi     = {10.1073/pnas.2016239118}
+}
+
+@article{lin2023esmfold,
+  author  = {Lin, Zeming and Akin, Halil and Rao, Roshan and Hie, Brian and
+             Zhu, Zhongkai and Lu, Wenting and Smetanin, Nikita and
+             Verkuil, Robert and Kabeli, Ori and Shmueli, Yaniv and
+             dos Santos Costa, Allan and Fazel-Zarandi, Maryam and
+             Sercu, Tom and Candido, Salvatore and Rives, Alexander},
+  title   = {Evolutionary-scale prediction of atomic-level protein structure
+             with a language model},
+  journal = {Science},
+  volume  = {379},
+  number  = {6637},
+  pages   = {1123--1130},
+  year    = {2023},
+  doi     = {10.1126/science.ade2574}
+}
+
+%% ESM-C / ESM Cambrian has no peer-reviewed paper or DOI. It was released by
+%% EvolutionaryScale on 4 December 2024 as open weights plus a technical blog
+%% post; the 300M variant has 30 layers and embedding dimension 960, which is
+%% the hidden size this work consumes. Cite the release itself.
+@misc{esmc2024,
+  author       = {{EvolutionaryScale Team}},
+  title        = {{ESM} {C}ambrian: revealing the mysteries of proteins with
+                  unsupervised learning},
+  year         = {2024},
+  howpublished = {\url{https://www.evolutionaryscale.ai/blog/esm-cambrian}},
+  note         = {Model release; {ESM} {C} 300{M}, 600{M} and 6{B}}
+}
+
+@inproceedings{wu2024tcrbert,
+  author    = {Wu, Kevin E. and Yost, Kathryn E. and Daniel, Bence and
+               Belk, Julia A. and Xia, Yu and Egawa, Takeshi and
+               Satpathy, Ansuman T. and Chang, Howard Y. and Zou, James},
+  title     = {{TCR-BERT}: learning the grammar of {T}-cell receptors for
+               flexible antigen-binding analyses},
+  booktitle = {Proceedings of the 18th Machine Learning in Computational
+               Biology Meeting},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {240},
+  pages     = {194--229},
+  year      = {2024},
+  publisher = {PMLR},
+  note      = {Preprint: bioRxiv 2021.11.18.469186}
+}
+
+@inproceedings{houlsby2019parameterefficient,
+  author    = {Houlsby, Neil and Giurgiu, Andrei and Jastrzebski, Stanislaw
+               and Morrone, Bruna and De Laroussilhe, Quentin and
+               Gesmundo, Andrea and Attariyan, Mona and Gelly, Sylvain},
+  title     = {Parameter-efficient transfer learning for {NLP}},
+  booktitle = {Proceedings of the 36th International Conference on Machine
+               Learning},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {97},
+  pages     = {2790--2799},
+  year      = {2019},
+  publisher = {PMLR}
+}
+
+%% -------------------------------------------------------- Mixture-of-experts
+
+@inproceedings{shazeer2017outrageously,
+  author    = {Shazeer, Noam and Mirhoseini, Azalia and Maziarz, Krzysztof
+               and Davis, Andy and Le, Quoc V. and Hinton, Geoffrey E. and
+               Dean, Jeff},
+  title     = {Outrageously large neural networks: the sparsely-gated
+               mixture-of-experts layer},
+  booktitle = {International Conference on Learning Representations},
+  year      = {2017},
+  note      = {arXiv:1701.06538}
+}
+
+@article{fedus2022switch,
+  author  = {Fedus, William and Zoph, Barret and Shazeer, Noam},
+  title   = {Switch transformers: scaling to trillion parameter models with
+             simple and efficient sparsity},
+  journal = {Journal of Machine Learning Research},
+  volume  = {23},
+  number  = {120},
+  pages   = {1--39},
+  year    = {2022}
+}
+
+@inproceedings{ma2018mmoe,
+  author    = {Ma, Jiaqi and Zhao, Zhe and Yi, Xinyang and Chen, Jilin and
+               Hong, Lichan and Chi, Ed H.},
+  title     = {Modeling task relationships in multi-task learning with
+               multi-gate mixture-of-experts},
+  booktitle = {Proceedings of the 24th {ACM} {SIGKDD} International
+               Conference on Knowledge Discovery and Data Mining},
+  pages     = {1930--1939},
+  year      = {2018},
+  doi       = {10.1145/3219819.3220007}
+}
+
+@inproceedings{tang2020ple,
+  author    = {Tang, Hongyan and Liu, Junning and Zhao, Ming and
+               Gong, Xudong},
+  title     = {Progressive layered extraction ({PLE}): a novel multi-task
+               learning ({MTL}) model for personalized recommendations},
+  booktitle = {Proceedings of the 14th {ACM} Conference on Recommender
+               Systems},
+  pages     = {269--278},
+  year      = {2020},
+  doi       = {10.1145/3383313.3412236}
+}
+
+@article{qu2026moetcr,
+  author  = {Qu, Wei and Li, Jinxing and He, Zhentao and Wang, Jiayi and
+             Zhu, Shanfeng},
+  title   = {{MoE-TCR}: mixture-of-experts framework for pan-specific
+             {TCR}-epitope binding prediction},
+  journal = {Pattern Recognition},
+  volume  = {179},
+  pages   = {113737},
+  year    = {2026},
+  doi     = {10.1016/j.patcog.2026.113737}
+}
+
+%% ------------------------------------------- Output constraints / consistency
+
+@inproceedings{xu2018semantic,
+  author    = {Xu, Jingyi and Zhang, Zilu and Friedman, Tal and Liang, Yitao
+               and Van den Broeck, Guy},
+  title     = {A semantic loss function for deep learning with symbolic
+               knowledge},
+  booktitle = {Proceedings of the 35th International Conference on Machine
+               Learning},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {80},
+  pages     = {5502--5511},
+  year      = {2018},
+  publisher = {PMLR}
+}
+
+@inproceedings{hu2016harnessing,
+  author    = {Hu, Zhiting and Ma, Xuezhe and Liu, Zhengzhong and
+               Hovy, Eduard and Xing, Eric},
+  title     = {Harnessing deep neural networks with logic rules},
+  booktitle = {Proceedings of the 54th Annual Meeting of the Association for
+               Computational Linguistics (Volume 1: Long Papers)},
+  pages     = {2410--2420},
+  year      = {2016},
+  doi       = {10.18653/v1/P16-1228}
+}
+
+@inproceedings{deng2014large,
+  author    = {Deng, Jia and Ding, Nan and Jia, Yangqing and Frome, Andrea
+               and Murphy, Kevin and Bengio, Samy and Li, Yuan and
+               Neven, Hartmut and Adam, Hartwig},
+  title     = {Large-scale object classification using label relation graphs},
+  booktitle = {Computer Vision -- {ECCV} 2014},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {8689},
+  pages     = {48--64},
+  year      = {2014},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-319-10590-1\_4}
+}
+
+%% ----------------------------------- PH->PHT hierarchical transfer methods
+%% Verified against the arXiv record, Crossref, and the papers' own full text.
+%% SCOPE NOTE, important for the comparison section: none of the four methods
+%% below has an independently supervised peptide--TCR branch. Fusion-pMT,
+%% TranspMHC/TransTCR and StriMap all route peptide--HLA knowledge into the
+%% triple task in one direction only; NeoMUST never leaves the peptide--HLA
+%% level. Only StriMap uses a frozen protein language model.
+
+%% Preprint only as of this writing: arXiv v1, no journal version found.
+%% No public code ("scheduled to be open-sourced upon publication"), so it
+%% cannot currently be run as a baseline.
+@misc{ma2025fusionpmt,
+  author       = {Ma, Jiahao and Li, Hongzong and Huang, Jian-Dong and
+                  Hu, Ye-Fan and Chen, Yifan},
+  title        = {Remodeling peptide-{MHC}-{TCR} triad binding as sequence
+                  fusion for immunogenicity prediction},
+  year         = {2025},
+  eprint       = {2501.01768},
+  archivePrefix= {arXiv},
+  primaryClass = {q-bio.BM},
+  doi          = {10.48550/arXiv.2501.01768},
+  url          = {https://arxiv.org/html/2501.01768v1},
+  note         = {Preprint}
+}
+
+%% NOTE: "TransTCR" is one of TWO models in this paper (the other is
+%% TranspMHC). Cite the paper, never "TransTCR, 2025", and name the model
+%% only in prose.
+@article{niu2025attention,
+  author  = {Niu, Rui and Wang, Jingwei and Li, Yanli and Zhou, Jiren and
+             Guo, Yang and Shang, Xuequn},
+  title   = {Attention-aware differential learning for predicting
+             peptide-{MHC} class {I} binding and {T} cell receptor
+             recognition},
+  journal = {Briefings in Bioinformatics},
+  volume  = {26},
+  number  = {1},
+  pages   = {bbaf038},
+  year    = {2025},
+  doi     = {10.1093/bib/bbaf038}
+}
+
+@article{cao2026strimap,
+  author  = {Cao, Kai and Li, Rui and Strazar, Martin and Brown, Eric M. and
+             Nguyen, Phuong N. U. and Pust, Marie-Madlen and Park, Jihye and
+             Graham, Daniel B. and Ashenberg, Orr and Uhler, Caroline and
+             Xavier, Ramnik J.},
+  title   = {A structure-informed deep learning framework for modeling
+             {TCR}-peptide-{HLA} interactions},
+  journal = {Nature Communications},
+  volume  = {17},
+  number  = {1},
+  pages   = {11184},
+  year    = {2026},
+  doi     = {10.1038/s41467-026-78063-1}
+}
+
+%% Both of NeoMUST's tasks are peptide--MHC level (presentation
+%% classification + affinity regression). It predicts no pTCR and no triple.
+%% Its expert layer is Customized Gate Control (CGC/PLE-style), NOT MMoE.
+@article{ma2024neomust,
+  author  = {Ma, Wang and Zhang, Jiawei and Yao, Hui},
+  title   = {{NeoMUST}: an accurate and efficient multi-task learning model
+             for neoantigen presentation},
+  journal = {Life Science Alliance},
+  volume  = {7},
+  number  = {4},
+  pages   = {e202302255},
+  year    = {2024},
+  doi     = {10.26508/lsa.202302255}
+}
+
+%% ------------------------------- Hierarchical consistency (prior art for the
+%% ------------------------------- directional consistency objective)
+%% HMCN supplies the squared-hinge violation penalty, but its penalty is
+%% symmetric in gradient (both operands move) and uses NO label conditioning.
+%% HMCN itself credits the max{0,.}^2 form to the order-embedding line
+%% (Wehrmann & Barros, CVPR 2018; Wehrmann, Mattjie & Barros, PRL 2018) --
+%% those two were NOT independently verified, so do not attribute the form to
+%% HMCN as its originator without checking them.
+%% PMLR gives pages 5075--5084. A widely mirrored third-party BibTeX gives
+%% 5225--5234, which is WRONG. Do not "correct" this back.
+@inproceedings{wehrmann2018hmcn,
+  author    = {Wehrmann, J{\^o}natas and Cerri, Ricardo and
+               Barros, Rodrigo C.},
+  title     = {Hierarchical multi-label classification networks},
+  booktitle = {Proceedings of the 35th International Conference on Machine
+               Learning},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {80},
+  pages     = {5075--5084},
+  year      = {2018},
+  publisher = {PMLR}
+}
+
+%% The closest relative of our directional rule: its MCLoss multiplies by the
+%% binary label INSIDE a max, so the label selects the candidate set and the
+%% max selects the gradient recipient. It contains no stop-gradient, enforces
+%% consistency architecturally (the max constraint module), and couples outputs
+%% along a FIXED taxonomy rather than per-sample label patterns.
+@inproceedings{giunchiglia2020chmcnn,
+  author    = {Giunchiglia, Eleonora and Lukasiewicz, Thomas},
+  title     = {Coherent hierarchical multi-label classification networks},
+  booktitle = {Advances in Neural Information Processing Systems},
+  volume    = {33},
+  pages     = {9662--9673},
+  year      = {2020},
+  publisher = {Curran Associates, Inc.}
+}
