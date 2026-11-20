@@ -227,12 +227,13 @@ on a learned representation — the task's own previous fusion — so only the
 ### Experimental strength
 - **No results at all.** This is the binding constraint on the whole draft.
 - No external predictor is wrapped by the code, so every baseline row needs work outside this stage. The repository holds only pMTnet and ERGO-II benchmark outputs from earlier work.
-- Single seed per invocation and no multi-seed runner, so "mean ± s.d. over seeds" requires repeated manual runs; the main-table caption must match whatever is actually run.
-- The expert-layer ablations that would isolate contribution 1 are **not implementable by configuration**. Either write them or weaken the contribution-1 claims.
+- Single seed per invocation and no multi-seed runner, so the "mean ± s.d. over 42/3407/2026" that §4A now specifies for both ablation tables and `tab:hparams` requires either repeated manual runs or a seed runner of the kind Stage 1 has (`run_plm_stage1_seeds.py`). Until one exists this is the largest gap between what the draft promises and what the repository can produce.
+- Eleven ablation variants are **not implementable by configuration** (§4A lists each with its override point). They now carry contributions 1, 2 and 3 rather than only contribution 1, so weakening the claims instead of writing the switches is no longer an option that leaves a publishable paper.
+- The ablation tables assume a per-variant model-selection rule, because the single-relation rows cannot use the mean-of-three-AUPRC rule. Nothing in the code expresses that yet.
 
 ### Evaluation completeness
 - Strong: entity-level splits, ten unseen benchmarks, four-class behaviour, violation diagnostics, calibration metrics, routing and gate statistics, cold-entity audit.
-- Gaps: no external cohort; unseen-pair/unseen-triple are combination splits, not strictly cold; a few TCRs in the two unseen-TCR benchmarks appear in some task's training pool; train/eval class priors differ (1:3 vs 1:1) and interact with the MCC-selected threshold.
+- Gaps: no external cohort; the two Results ablation tables now report the diagnostic classes (`100` vs `000`, `010` vs `000`) alongside aggregate AUPRC, because aggregate PHT AUPRC dilutes the distinction the triple branch exists to make; unseen-pair/unseen-triple are combination splits, not strictly cold; a few TCRs in the two unseen-TCR benchmarks appear in some task's training pool; train/eval class priors differ (1:3 vs 1:1) and interact with the MCC-selected threshold.
 - All threshold-dependent metrics inherit the validation threshold choice; the draft separates them from AUROC/AUPRC explicitly.
 
 ### Method design soundness
@@ -283,6 +284,97 @@ Known cosmetic items left open:
   author-year natbib raises "Bibliography not compatible with author-year
   citations".
 
+## 4A. Ablation design: one row per qualifier
+
+Rule used to build `tab:ablation`, `tab:ablation2` and `tab:app:sensitivity`:
+**every qualifier in the contribution list gets one variant that removes exactly
+that qualifier and nothing else.** Applying it exposed three gaps in the
+previous 12-row table.
+
+| Contribution | Qualifier | Was covered? | Row now |
+|---|---|---|---|
+| 1 | globally shared / branch-private | yes | all-shared (4+0), private-only (0+4) |
+| 1 | position-wise, keeps residue axis | yes | experts after pooling |
+| 1 | gated (learned) | yes | uniform gate |
+| 1 | inside the interaction block | yes | triple reads pre-expert U_PH |
+| 1 | three branches read different entity compositions | **no** | shared pool restricted to each relation pair |
+| 1 | gate reads a relation summary, not raw input | partial | gate on entity summaries only (the CGC-matched control) |
+| 2 | HLA-conditioned | **no** | β without HLA conditioning |
+| 2 | residue-level | **no** | scalar β, one per sample |
+| 2 | gated | **no** | ungated transfer β≡1 |
+| 2 | replaces a pooled scalar summary | **no** | pooled-vector fusion instead |
+| 3 | directional (stop-gradient) | yes | symmetric hinge |
+| 3 | label-aware | **no** | label-agnostic consistency |
+| 3 | four terms, one per class | **no** | hierarchy only / PT-implication only |
+| 3 | no hard probability hierarchy | **no** | hard min in training; hard min at inference |
+
+Contribution 2 was the worst case: four qualifiers sharing one row that removed
+the whole path, so none of them was individually tested.
+
+Three further changes, none of them architectural but each a standalone
+rejection risk:
+
+1. **Seeds.** The draft reported a single seed (42). Every row of both ablation
+   tables is now specified as mean ± s.d. over 42 / 3407 / 2026, which is the
+   project's experiment-seed set; `tab:app:sensitivity` is explicitly one seed
+   and says so.
+2. **Diagnostic-class columns.** Aggregate PHT AUPRC dilutes exactly the
+   distinction the triple branch exists to make. Both tables now carry
+   `100` vs `000` and `010` vs `000` columns.
+3. **s_min / s_prod promoted from a TODO note to table rows**, in both
+   `tab:main` and `tab:ablation`. They cost no training (post hoc on the full
+   model's own pair heads) and they are the only honest answer to R1 (class
+   `110` absent ⇒ PHT ≡ PH ∧ PT on every consumable row).
+
+The Discussion limitation "we cannot report mutual task promotion" was rewritten:
+the three single-relation rows now carry that claim, and the limitation states
+that zeroing a task weight is *not* a single-task model, because the other
+tasks' gradients still reach the shared modules.
+
+### Implementation route (respects the project's immutability rule)
+
+`CLAUDE.md` forbids changing a finished stage's behaviour. Every switch below
+therefore goes in as a **default-off flag on the `stage_final` subclasses**
+(`stage_final_model.py`, 14 lines, and `stage_final_loss.py`, 6 lines — both
+thin wrappers with clean override points), never by editing
+`stage_MOE_model.py`, `stage_MOE_PT_model.py` or `stage_MOE_consis_loss.py`.
+
+Reachable by configuration today: `pt_fusion_enabled`, `aux_ph_weight`,
+`aux_pt_weight`, `hierarchy_lambda`, `pt_implication_lambda`,
+`consistency_margin`, `consistency_warmup_epochs` / `consistency_ramp_epochs`,
+`balance_lambda`, `temperature_start` / `temperature_end`, `fusion_bias_init`,
+`sequence_encoder_num_layers`, and joint vs sequential via the two entry
+scripts.
+
+Needs code, with the override point:
+
+| Variant | Override point |
+|---|---|
+| expert counts, shared-pool membership | `range(2)` at `stage_MOE_model.py:49` and `:99`; router output width 4 at `:51` |
+| uniform / frozen gate | gate softmax, `stage_MOE_model.py:58` |
+| gate context composition | `stage_MOE_model.py:109` |
+| experts after pooling, plain FFN | MoE/pooling order in `_branch`, `stage_MOE_model.py:110` |
+| triple reads pre-expert U_PH | `zph` argument at `stage_MOE_PT_model.py:68` |
+| β≡1 / scalar β / β without HLA | `PTFusion.forward`, `stage_MOE_PT_model.py:29-39` |
+| drop stop-gradient, label-agnostic, hard min | the four specs at `stage_MOE_consis_loss.py:50-53` |
+| single-relation training | active-task filter in `stage_final_trainer.py`; note `ph/pt/pht_weight` are validated `> 0` at `stage_final_config.py:132` |
+
+Each flag belongs to the resume contract, so every variant needs its own config
+and trains from scratch.
+
+### Cost and protocol
+
+Roughly 30 training variants across the two Results tables plus the appendix
+table. At three seeds that is ~90 runs, which is not the intended reading: the
+protocol is to **screen every variant at one seed, then re-run at three seeds
+only the rows that reach the paper.** Constraints that must hold across rows or
+the tables stop being comparable: identical epoch budget, identical
+early-stopping criterion, and a stated model-selection rule per variant — the
+single-relation rows cannot use the mean-of-three-AUPRC rule and select on
+their own relation instead.
+
+Free rows (no training): s_min, s_prod, hard min at inference.
+
 ## 5. Ordered next actions
 
 1. ~~Fill the bibliography.~~ **Done.** 32 verified entries; no stubs remain.
@@ -290,17 +382,14 @@ Known cosmetic items left open:
    Still worth a human pass: confirm the author lists render as the journal
    expects, and decide whether to cite ESM-C's release page or a later paper if
    one appears.
-2. **Implement contribution 1's ablations — no longer optional.** Because
-   contribution 1 is now a fit claim rather than a mechanism claim, its
-   evidence is the whole argument. Needed, and none reachable by configuration
-   today: matched-parameter plain FFN (separates decomposition from capacity),
-   all-shared experts, private-only experts, uniform/non-learned gate, gate on
-   peptide summary only, experts after pooling (removes residue resolution
-   while keeping the topology), and a triple branch reading the pre-expert
-   representation (keeps experts but blocks their reach into the triple).
-   Expert counts are hard-coded and there is no gate-override switch, so each
-   needs code. Also needed for contribution 3: a flag to drop the stop-gradient,
-   giving the symmetric-hinge control.
+2. **Implement the ablation switches — no longer optional.** Because
+   contribution 1 is a fit claim rather than a mechanism claim, and because
+   contributions 2 and 3 each have qualifiers with no control, the ablation
+   tables now carry the whole argument. §4A lists every variant, its override
+   point, and which ones configuration already reaches. Eleven need code, all
+   of it as default-off flags on the `stage_final` subclasses so no finished
+   stage changes behaviour. The one that converts a self-declared limitation
+   into a result is the single-relation training mode.
 3. **Check the α_r predictions actually hold** before the fit argument goes to
    review. If α_r is flat across the three relations and across samples, the
    gate is not using the decomposition and the honest conclusion is that any

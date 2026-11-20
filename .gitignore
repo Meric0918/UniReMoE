@@ -121,3 +121,8 @@ swanlog/
 !*.env.example
 !configs/*.json
 !configs/**/*.json
+
+# Keep the entire paper folder out of the default ignore rules.
+!/paper/
+!/paper/**
+
