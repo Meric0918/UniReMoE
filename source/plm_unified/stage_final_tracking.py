@@ -34,7 +34,7 @@ class StageFinalTracker:
             project=settings.project, workspace=settings.workspace,
             name=name, mode=settings.mode, group=settings.group,
             tags=[*settings.tags, training_mode], job_type='train',
-            description=f'Stage Final v1 {training_mode} PH/PT/PHT training with PT fusion and directed consistency.',
+            description=f'{config.architecture} {training_mode} PH/PT/PHT training with PT fusion and directed consistency.',
             config={**config.to_dict(), 'training_mode': training_mode},
             log_dir=str(run_dir / 'swanlog'),
             **({'id': resume_id, 'resume': 'must'} if resume_id else {'resume': 'never'}))

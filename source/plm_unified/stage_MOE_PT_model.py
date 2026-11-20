@@ -1,7 +1,7 @@
 """Document v2: residue-aligned, HLA-conditioned PT fusion before PHT MoE."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import torch
 from torch import nn
 
@@ -15,6 +15,14 @@ ARCHITECTURE = 'stage_MOE_PT_v2'
 @dataclass
 class StageMOEPTOutput(StageMOEOutput):
     fusion_beta: torch.Tensor | None = None  # [B, peptide_length], zero on padding
+    fusion_alpha: torch.Tensor | None = field(default=None, kw_only=True)
+
+
+def sample_gate(dim, hidden, bias):
+    module = nn.Sequential(nn.Linear(3 * dim, hidden), nn.GELU(), nn.Linear(hidden, 1))
+    nn.init.zeros_(module[-1].weight)
+    nn.init.constant_(module[-1].bias, bias)
+    return module
 
 
 class PTFusion(nn.Module):
@@ -26,7 +34,7 @@ class PTFusion(nn.Module):
         self.gate = nn.Sequential(nn.Linear(3 * dim, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, 1))
         nn.init.constant_(self.gate[-1].bias, bias_init)
 
-    def forward(self, query, pt, hla_summary, peptide_mask):
+    def forward(self, query, pt, hla_summary, peptide_mask, *, alpha=None):
         valid = peptide_mask.bool().unsqueeze(-1)
         query = query.masked_fill(~valid, 0)
         pt = pt.masked_fill(~valid, 0)
@@ -35,7 +43,10 @@ class PTFusion(nn.Module):
                              hla_summary[:, None, :].expand_as(query)), dim=-1)
         beta = self.gate(context).float().sigmoid().masked_fill(~valid, 0)
         residual = self.projection(normalized_pt)
-        fused = (query + beta.to(residual.dtype) * residual).masked_fill(~valid, 0)
+        if alpha is not None and alpha.ndim == 1:
+            alpha = alpha[:, None, None]
+        weight = beta if alpha is None else alpha * beta
+        fused = (query + weight.to(residual.dtype) * residual).masked_fill(~valid, 0)
         return fused, beta.squeeze(-1)
 
 
@@ -51,6 +62,9 @@ class StageMOEPTBindingModel(StageMOEBindingModel):
     def forward(self, *args, **kwargs):
         result = super().forward(*args, **kwargs)
         return StageMOEPTOutput(**vars(result))
+
+    def fusion_alpha(self, query, pt, hla_summary, peptide_mask):
+        return None
 
     def _triplet(self, peptide_hidden, peptide_mask, hla_hidden, hla_mask, tcr_hidden, tcr_mask,
                  *, all_heads, return_attention=False, return_features=False):
@@ -69,7 +83,8 @@ class StageMOEPTBindingModel(StageMOEBindingModel):
         zpt = self._branch('pt', p, t, peptide_mask, tcr_mask, [pm, tm], output,
                            return_attention, return_features, classify=all_heads)
         hidden, weights = self.cross_attention['pht'](zph, t, peptide_mask, tcr_mask, return_attention)
-        fused, output.fusion_beta = self.fusion(hidden, zpt, hm, peptide_mask)
+        output.fusion_alpha = self.fusion_alpha(hidden, zpt, hm, peptide_mask)
+        fused, output.fusion_beta = self.fusion(hidden, zpt, hm, peptide_mask, alpha=output.fusion_alpha)
         context = torch.cat([masked_mean(fused, peptide_mask), pm, hm, tm], -1)
         sequence, gates = self.moe['pht'](fused, context, peptide_mask, self.shared_experts, self.temperature)
         output.routing['pht'] = gates

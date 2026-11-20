@@ -12,15 +12,16 @@ from .stage_final_checkpoint import (atomic_save, capture_rng, restore_rng, load
 from .stage_final_data import make_loader, move_batch, cache_identity
 from .stage_final_evaluation import autocast_context, RoutingStatistics, evaluate_validation, write_json
 from .stage_MOE_PT_evaluation import FusionStatistics
-from .stage_final_loss import compute_stage_final_loss, LossStatistics
-from .stage_final_model import TASKS, ARCHITECTURE, forward_batch
+from .stage_final_loss import LossStatistics
+from .stage_final_model import TASKS, forward_batch
 
 
 def build_stage_final_optimizer(model, settings):
     routers, other = [], []
     for name, param in model.named_parameters():
         if param.requires_grad:
-            (routers if '.router.' in name or name.startswith('fusion.gate.') else other).append(param)
+            is_gate = '.router.' in name or name.startswith(('fusion.gate.', 'sample_gate.'))
+            (routers if is_gate else other).append(param)
     groups = [{'name': 'modules', 'params': other, 'lr': settings.learning_rate},
               {'name': 'routers', 'params': routers, 'lr': settings.router_learning_rate}]
     ids = [id(p) for group in groups for p in group['params']]
@@ -110,7 +111,7 @@ class StageFinalTrainer:
                 batch = move_batch(raw, self.device)
                 with autocast_context(self.device, s.mixed_precision):
                     output = forward_batch(self.model, task, batch)
-                    result = compute_stage_final_loss(output, batch['labels'], batch['masks'],
+                    result = self.model.compute_loss(output, batch['labels'], batch['masks'],
                         task=task, settings=s, epoch=epoch)
                 if not torch.isfinite(result.total):
                     raise FloatingPointError(f'Non-finite {task} loss at epoch {epoch}, step {step}')
@@ -121,7 +122,7 @@ class StageFinalTrainer:
                 sums[task] += float(result.supervised.detach()) * result.valid_labels
                 balance_sum += float(result.balance.detach())
                 routing.update(output.routing)
-                fusion.update(output.fusion_beta, batch['peptide_mask'])
+                fusion.update(output.fusion_beta, batch['peptide_mask'], alpha=output.fusion_alpha)
                 loss_statistics.update(task, result)
             if valid_count:
                 successful_steps += int(self._optimizer_step())
@@ -147,7 +148,7 @@ class StageFinalTrainer:
                     sum(p.numel() for branch in self.model.moe.values() for p in branch.experts.parameters())}
 
     def _payload(self, evaluation, role):
-        return {'architecture': ARCHITECTURE, 'format_version': 1, 'role': role,
+        return {'architecture': self.model.architecture, 'format_version': 1, 'role': role,
                 'training_mode': self.training_mode,
                 'swanlab_run_id': getattr(self.tracker, 'run_id', None) or self.swanlab_run_id,
                 'model': {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()},
@@ -158,7 +159,9 @@ class StageFinalTrainer:
                 'data_fingerprint': self.contract['data_fingerprint']}
 
     def resume(self, path):
-        checkpoint = load_checkpoint(path, config=self.config, role='last')
+        self.restore_checkpoint(load_checkpoint(path, config=self.config, role='last'))
+
+    def restore_checkpoint(self, checkpoint):
         if checkpoint.get('training_mode', 'joint') != self.training_mode:
             raise ValueError('Resume training mode mismatch: use the matching joint/sequential entrypoint')
         if checkpoint.get('contract') != self.contract:

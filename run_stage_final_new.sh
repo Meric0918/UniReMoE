@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+if [[ -z ${PYTHON_BIN:-} ]]; then
+  if [[ -x /home/mjp/miniconda3/envs/unifyimmun/bin/python ]]; then
+    PYTHON_BIN=/home/mjp/miniconda3/envs/unifyimmun/bin/python
+  else
+    PYTHON_BIN=$(command -v python3)
+  fi
+fi
+CONFIG=${STAGE_FINAL_NEW_CONFIG:-"$PROJECT_ROOT/configs/plm_stage_final_new.yaml"}
+ACTION=${1:-audit}
+if [[ $# -gt 0 ]]; then shift; fi
+case "$ACTION" in
+  audit|cache|train|train-sequential|evaluate|benchmark) command=$ACTION ;;
+  resume) command=train ;;
+  resume-sequential) command=train-sequential ;;
+  *) echo "Usage: $0 {audit|cache|train|train-sequential|resume|resume-sequential|evaluate|benchmark} [options]" >&2; exit 2 ;;
+esac
+if [[ "$ACTION" == resume || "$ACTION" == resume-sequential ]]; then
+  HAS_RESUME=false
+  for ARG in "$@"; do
+    if [[ "$ARG" == --resume || "$ARG" == --resume=* ]]; then HAS_RESUME=true; fi
+  done
+  if [[ "$HAS_RESUME" != true ]]; then echo 'resume requires --resume PATH' >&2; exit 2; fi
+fi
+exec "$PYTHON_BIN" "$PROJECT_ROOT/source/run_plm_stage_final_new.py" "$command" --config "$CONFIG" "$@"

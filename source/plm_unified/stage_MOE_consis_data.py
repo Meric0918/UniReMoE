@@ -51,15 +51,15 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def read_task_records(path, task, model, *, expected_split=None):
-    """Triplet train/val require all labels; evaluation supports missing auxiliaries."""
+def read_task_records(path, task, model, *, expected_split=None, ph_only_triplets=False):
+    """Read native labels and the triplet supervision used by the experiment."""
     if task not in TASKS:
         raise ValueError(f'Unknown task: {task}')
     path = Path(path)
     records, seen = [], {}
     stats = {'input_rows': 0, 'duplicates': 0, 'retained_rows': 0, 'positive_rows': 0,
              'invalid_sequence_rows': 0, 'rejected_rows': [],
-             'source_file': str(path), 'sha256': file_sha256(path), 'label_policy': 'triplet_full_supervision'}
+             'source_file': str(path), 'sha256': file_sha256(path), 'label_policy': 'triplet_ph_supervision' if ph_only_triplets else 'triplet_full_supervision'}
     label_column = 'pht' if task == 'pht' else 'label'
     with path.open(newline='', encoding='utf-8-sig') as handle:
         reader = csv.DictReader(handle)
@@ -68,7 +68,10 @@ def read_task_records(path, task, model, *, expected_split=None):
             raise ValueError(f'Duplicate normalized CSV columns: {path}')
         required = set(ENTITIES[task]) | {label_column}
         if task == 'pht' and expected_split in ('train', 'val'):
-            required.update(('ph', 'pt', 'class_code'))
+            if not ph_only_triplets:
+                required.update(('ph', 'pt', 'class_code'))
+            elif expected_split == 'train':
+                required.add('ph')
         if not required.issubset(columns):
             raise ValueError(f'{path}: missing columns {sorted(required - set(columns))}')
         for rownum, raw in enumerate(reader, 2):
@@ -103,20 +106,23 @@ def read_task_records(path, task, model, *, expected_split=None):
                 code = row.get('class_code', '')
                 if code and code not in ('000', '010', '100', '111'):
                     raise ValueError(f'{path}:{rownum}: invalid class_code {code!r}')
-                for index, name in enumerate(('ph', 'pt')):
+                auxiliary_tasks = ('ph',) if ph_only_triplets else ('ph', 'pt')
+                for index, name in enumerate(auxiliary_tasks):
                     raw_label = row.get(name, '')
                     if not raw_label:
-                        if expected_split in ('train', 'val'):
+                        if expected_split == 'train' or (expected_split == 'val' and not ph_only_triplets):
                             raise ValueError(f'{path}:{rownum}: missing {name} label')
                         continue
                     value = float(raw_label)
                     if value not in (0.0, 1.0):
                         raise ValueError(f'{path}:{rownum}: invalid {name} label')
                     labels[index], masks[index] = value, True
-                if expected_split in ('train', 'val') and not code:
+                if not ph_only_triplets and expected_split in ('train', 'val') and not code:
                     raise ValueError(f'{path}:{rownum}: missing class_code')
                 if code and any(masks[i] and labels[i] != int(code[i]) for i in range(3)):
                     raise ValueError(f'{path}:{rownum}: class_code/labels mismatch')
+                if ph_only_triplets and masks[0] and labels[0] == 0 and label == 1:
+                    raise ValueError(f'{path}:{rownum}: PHT-positive triplet requires a positive PH label')
                 if all(masks) and ''.join(str(int(v)) for v in labels) not in ('000', '010', '100', '111'):
                     raise ValueError(f'{path}:{rownum}: invalid triplet labels')
             record = StageMOEConsisRecord(**entities, labels=tuple(labels), masks=tuple(masks),
@@ -141,13 +147,15 @@ def read_task_records(path, task, model, *, expected_split=None):
 
 
 def audit_stage_MOE_consis_data(config, splits=('train', 'val')):
-    datasets, report = {}, {'label_policy': 'triplet_full_supervision', 'files': {}, 'entity_overlap': {}}
-    digest = hashlib.sha256(b'stage_MOE_consis_triplet_full_supervision_v1')
+    ph_only = getattr(config, 'ph_only_triplets', False)
+    policy = 'triplet_ph_supervision' if ph_only else 'triplet_full_supervision'
+    datasets, report = {}, {'label_policy': policy, 'files': {}, 'entity_overlap': {}}
+    digest = hashlib.sha256(f'stage_MOE_consis_{policy}_v1'.encode())
     for split in splits:
         datasets[split] = {}
         for task in TASKS:
             path = config.paths.data_root / task.upper() / f'{split}.csv'
-            records, stats = read_task_records(path, task, config.model, expected_split=split)
+            records, stats = read_task_records(path, task, config.model, expected_split=split, ph_only_triplets=ph_only)
             if split in ('train', 'val') and not (stats['positive_rows'] and stats['negative_rows']):
                 raise ValueError(f'{path}: training/validation require both classes')
             datasets[split][task] = records

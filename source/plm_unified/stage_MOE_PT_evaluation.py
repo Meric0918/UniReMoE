@@ -64,13 +64,30 @@ class FusionStatistics:
         self.count = 0
         self.total = self.squares = 0.0
         self.near_zero = self.near_one = 0
+        self.alpha = None  # Last scalar for legacy v1.
+        self.sample_count = 0
+        self.alpha_sum = self.alpha_squares = 0.0
+        self.effective_total = 0.0
 
-    def update(self, beta, mask):
+    def update(self, beta, mask, *, alpha=None):
         if beta is None:
             return
         values = beta.detach().float()[mask.bool()]
         self.count += values.numel()
-        self.total += float(values.double().sum())
+        batch_total = float(values.double().sum())
+        self.total += batch_total
+        if alpha is not None and alpha.ndim == 1:
+            sample_alpha = alpha.detach().double()
+            if sample_alpha.shape[0] != beta.shape[0]:
+                raise ValueError('Expected one fusion alpha per sample')
+            self.sample_count += sample_alpha.numel()
+            self.alpha_sum += float(sample_alpha.sum())
+            self.alpha_squares += float(sample_alpha.square().sum())
+            residue_sums = beta.detach().double().masked_fill(~mask.bool(), 0).sum(1)
+            self.effective_total += float((residue_sums * sample_alpha).sum())
+        elif alpha is not None:
+            self.alpha = float(alpha.detach())
+            self.effective_total += self.alpha * batch_total
         self.squares += float(values.double().square().sum())
         self.near_zero += int((values < 0.05).sum())
         self.near_one += int((values > 0.95).sum())
@@ -79,7 +96,14 @@ class FusionStatistics:
         if not self.count:
             return {'residues': 0}
         mean = self.total / self.count
-        return {'residues': self.count, 'mean': mean,
+        task_gate = {} if self.alpha is None else {
+            'alpha': self.alpha, 'beta_mean': mean, 'effective_mean': self.effective_total / self.count}
+        if self.sample_count:
+            alpha_mean = self.alpha_sum / self.sample_count
+            task_gate = {'samples': self.sample_count, 'alpha_mean': alpha_mean,
+                         'alpha_std': max(0.0, self.alpha_squares / self.sample_count - alpha_mean**2)**0.5,
+                         'beta_mean': mean, 'effective_mean': self.effective_total / self.count}
+        return {**task_gate, 'residues': self.count, 'mean': mean,
                 'std': max(0.0, self.squares / self.count - mean * mean) ** 0.5,
                 'near_zero_fraction': self.near_zero / self.count,
                 'near_one_fraction': self.near_one / self.count}

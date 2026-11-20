@@ -95,6 +95,14 @@ TCR-BERT features, followed by the Stage Adapter PHT sequential cross-attention
 path. It uses the same PHT data, balanced supervision, and two-phase training.
 See [PLM_STAGE_PHT.md](PLM_STAGE_PHT.md) for configuration and commands.
 
+### Standard MoE ablation of Stage Final
+
+`stage_standard_moe` replaces the Full model's MoE with independent four-expert
+branch pools, linear gates and sample-level Top-2 routing. It retains PH-to-PHT
+features, PT fusion and consistency supervision, and uses seed 42 sequential
+training. See [PLM_STAGE_STANDARD_MOE.md](PLM_STAGE_STANDARD_MOE.md) for the
+comparison, matching data configuration, resume and evaluation commands.
+
 ### Model testing
 Given the fine-tuned model or our trained model (saved in trained_model folder), you can evaluate it on our demo test sets using the following scripts.
 >Predict HLA binding specificity using pHLA test set

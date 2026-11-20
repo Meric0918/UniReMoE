@@ -10,7 +10,7 @@ import torch
 from .stage_final_data import make_loader, move_batch
 from .stage_final_evaluation import autocast_context, RoutingStatistics
 from .stage_MOE_PT_evaluation import FusionStatistics
-from .stage_final_loss import compute_stage_final_loss, LossStatistics
+from .stage_final_loss import LossStatistics
 from .stage_final_model import TASKS, forward_batch
 from .stage_final_trainer import StageFinalTrainer
 
@@ -63,7 +63,7 @@ class StageFinalSequentialTrainer(StageFinalTrainer):
                 batch = move_batch(raw, self.device)
                 with autocast_context(self.device, s.mixed_precision):
                     output = forward_batch(self.model, task, batch)
-                    result = compute_stage_final_loss(
+                    result = self.model.compute_loss(
                         output, batch['labels'], batch['masks'],
                         task=task, settings=s, epoch=epoch)
                 if not torch.isfinite(result.total):
@@ -75,7 +75,7 @@ class StageFinalSequentialTrainer(StageFinalTrainer):
                 sums[task] += float(result.supervised.detach()) * result.valid_labels
                 balance_sum += float(result.balance.detach())
                 routing.update(output.routing)
-                fusion.update(output.fusion_beta, batch['peptide_mask'])
+                fusion.update(output.fusion_beta, batch['peptide_mask'], alpha=output.fusion_alpha)
                 loss_statistics.update(task, result)
                 if (step + 1) % s.log_every_steps == 0:
                     print(json.dumps({'epoch': epoch, 'task': task, 'step': step + 1,

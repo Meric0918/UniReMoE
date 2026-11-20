@@ -15,11 +15,13 @@ MODEL_SETTINGS = ('pt_fusion_enabled', 'fusion_hidden_dim', 'fusion_bias_init', 
 
 def model_contract(config):
     raw = config.to_dict()
-    return {'model': raw['model'], 'stage_final': {k: raw['stage_final'][k] for k in MODEL_SETTINGS}}
+    stage = config.stage_name
+    fields = MODEL_SETTINGS + config.extra_model_settings
+    return {'model': raw['model'], stage: {k: raw[stage][k] for k in fields}}
 
 
 def training_contract(config, data_fingerprint, cache_fingerprints):
-    settings = config.to_dict()['stage_final']
+    settings = config.to_dict()[config.stage_name]
     for name in ('device', 'num_workers', 'eval_batch_size', 'log_every_steps', 'cache_batch_size', 'cache_shard_size'):
         settings.pop(name)
     return {'model': model_contract(config), 'training': settings,
@@ -52,8 +54,13 @@ def atomic_save(payload, path):
 
 def load_checkpoint(path, *, config=None, role=None):
     checkpoint = torch.load(path, map_location='cpu', weights_only=False)
-    if not isinstance(checkpoint, dict) or checkpoint.get('architecture') != ARCHITECTURE or checkpoint.get('format_version') != 1:
-        raise ValueError('Expected a stage_final_v1 checkpoint; other stage checkpoints are incompatible')
+    return validate_checkpoint(checkpoint, config=config, role=role)
+
+
+def validate_checkpoint(checkpoint, *, config=None, role=None):
+    expected = config.architecture if config is not None else ARCHITECTURE
+    if not isinstance(checkpoint, dict) or checkpoint.get('architecture') != expected or checkpoint.get('format_version') != 1:
+        raise ValueError(f'Expected a {expected} checkpoint. For older evaluation-only checkpoints, use evaluate or benchmark.')
     if checkpoint.get('role') not in ('best', 'last') or (role and checkpoint['role'] != role):
         raise ValueError(f'Expected {role or "best/last"} checkpoint')
     required = {'model', 'model_contract', 'config', 'temperature', 'thresholds', 'encoders', 'epoch'}

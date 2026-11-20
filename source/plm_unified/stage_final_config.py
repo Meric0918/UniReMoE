@@ -20,7 +20,7 @@ class StageFinalPaths:
 
 
 @dataclass
-class StageFinalSettings:
+class _FinalObjectiveSettings:
     pt_fusion_enabled: bool = True
     fusion_hidden_dim: int = 128
     fusion_bias_init: float = -2.0
@@ -29,6 +29,10 @@ class StageFinalSettings:
     consistency_margin: float = 0.05
     hierarchy_lambda: float = 0.05
     pt_implication_lambda: float = 0.03
+
+
+@dataclass
+class StageFinalTrainingSettings:
     consistency_warmup_epochs: int = 3
     consistency_ramp_epochs: int = 5
     sequence_encoder_num_layers: int = 3
@@ -76,7 +80,19 @@ class StageFinalSettings:
 
 
 @dataclass
+class StageFinalSettings(StageFinalTrainingSettings, _FinalObjectiveSettings):
+    pass
+
+
+@dataclass
 class StageFinalConfig:
+    ph_only_triplets = False
+    objective_fields = ('aux_ph_weight', 'aux_pt_weight', 'hierarchy_lambda', 'pt_implication_lambda', 'consistency_margin')
+    stage_name = 'stage_final'
+    architecture = 'stage_final_v1'
+    extra_model_settings = ()
+    settings_type = StageFinalSettings
+
     paths: StageFinalPaths
     model: ModelConfig = field(default_factory=ModelConfig)
     stage_final: StageFinalSettings = field(default_factory=StageFinalSettings)
@@ -102,7 +118,7 @@ class StageFinalConfig:
             raise ValueError("fusion_hidden_dim must be a positive integer")
         if not math.isfinite(s.fusion_bias_init):
             raise ValueError("fusion_bias_init must be finite")
-        for name in ('aux_ph_weight', 'aux_pt_weight', 'hierarchy_lambda', 'pt_implication_lambda', 'consistency_margin'):
+        for name in self.objective_fields:
             value = getattr(s, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f'{name} must be finite and nonnegative')
@@ -157,23 +173,28 @@ class StageFinalConfig:
                 if root == protected or root in protected.parents or protected in root.parents:
                     raise ValueError(f'{name} overlaps data or pretrained models')
         cache, output = self.paths.cache_root.resolve(), self.paths.output_root.resolve()
-        if not any('stage_final' in part.lower() for part in output.parts):
-            raise ValueError('output_root must use a dedicated stage_final directory')
+        if not any(self.stage_name.lower() in part.lower() for part in output.parts):
+            raise ValueError(f'output_root must use a dedicated {self.stage_name} directory')
         if cache == output or cache in output.parents or output in cache.parents:
             raise ValueError('Cache and output directories must be separate')
 
     def to_dict(self):
         obj = asdict(self)
         obj['paths'] = {k: str(v) for k, v in obj['paths'].items()}
+        obj[self.stage_name] = obj.pop('stage_final')
         return obj
 
 
-def load_stage_final_config(path):
+def load_stage_final_config(path, *, config_type=StageFinalConfig):
     path = Path(path).resolve()
-    raw = yaml.safe_load(path.read_text())
-    if not isinstance(raw, dict) or set(raw) - {'paths', 'model', 'stage_final', 'swanlab'}:
-        raise ValueError('Expected only paths, model, stage_final and swanlab config sections')
-    constructors = {'paths': StageFinalPaths, 'model': ModelConfig, 'stage_final': StageFinalSettings}
+    return parse_stage_final_config(path, yaml.safe_load(path.read_text()), config_type)
+
+
+def parse_stage_final_config(path, raw, config_type):
+    stage = config_type.stage_name
+    if not isinstance(raw, dict) or set(raw) - {'paths', 'model', stage, 'swanlab'}:
+        raise ValueError(f'Expected only paths, model, {stage} and swanlab config sections')
+    constructors = {'paths': StageFinalPaths, 'model': ModelConfig, stage: config_type.settings_type}
     sections = {}
     for name, constructor in constructors.items():
         values = raw.get(name, {})
@@ -181,14 +202,12 @@ def load_stage_final_config(path):
             raise ValueError(f'Unknown fields in {name}')
         if name == 'paths':
             values = {k: (path.parent / Path(v).expanduser()).resolve() for k, v in values.items()}
-        sections[name] = constructor(**values)
+        sections['stage_final' if name == stage else name] = constructor(**values)
+    config = config_type(**sections)
     if 'swanlab' in raw:
         values = raw['swanlab']
         if not isinstance(values, dict) or set(values) - SwanLabConfig.__dataclass_fields__.keys():
             raise ValueError('Unknown fields in swanlab')
-        defaults = dict(mode='disabled', group='plm-stage_final', experiment_prefix='PLM-Stage_final',
-                        tags=['ESMC-300M', 'TCR-BERT', 'stage_final'])
-        sections['swanlab'] = SwanLabConfig(**(defaults | values))
-    config = StageFinalConfig(**sections)
+        config.swanlab = SwanLabConfig(**(asdict(config.swanlab) | values))
     config.validate()
     return config

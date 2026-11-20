@@ -17,7 +17,11 @@ from .stage_final_data import move_batch
 from .stage_final_model import forward_batch
 
 
-def triplet_diagnostics(rows, threshold, margin):
+PH_HIERARCHY = ('hierarchy', 'ph', ('000', '010'))
+CONSTRAINTS = (PH_HIERARCHY, ('pt_implication', 'pt', ('000', '100')))
+
+
+def triplet_diagnostics(rows, threshold, margin, *, ph_only=False):
     """Probability diagnostics use all rows; directed masks require complete labels."""
     result = {'margin': margin, 'classes': {}, 'constraints': {}}
     for code in ('000', '010', '100', '111'):
@@ -25,12 +29,16 @@ def triplet_diagnostics(rows, threshold, margin):
         rate = sum(r['p_pht'] >= threshold for r in selected) / len(selected) if selected else None
         result['classes'][code] = {'samples': len(selected),
                                   'recall' if code == '111' else 'false_positive_rate': rate}
-    for name, pair, negative_codes in (('hierarchy', 'ph', ('000', '010')),
-                                        ('pt_implication', 'pt', ('000', '100'))):
-        scopes = {'all': rows,
-                  'applicable': [r for r in rows if r['complete_labels'] and r['class_code'] in ('111', *negative_codes)],
-                  'positive': [r for r in rows if r['complete_labels'] and r['class_code'] == '111'],
-                  'negative': [r for r in rows if r['complete_labels'] and r['class_code'] in negative_codes]}
+    for name, pair, negative_codes in ((PH_HIERARCHY,) if ph_only else CONSTRAINTS):
+        if ph_only:
+            positive = [r for r in rows if r['y_ph'] == 1 and r['y_pht'] == 1]
+            negative = [r for r in rows if r['y_ph'] == 0 and r['y_pht'] == 0]
+            scopes = {'applicable': positive + negative, 'positive': positive, 'negative': negative}
+        else:
+            scopes = {'all': rows,
+                      'applicable': [r for r in rows if r['complete_labels'] and r['class_code'] in ('111', *negative_codes)],
+                      'positive': [r for r in rows if r['complete_labels'] and r['class_code'] == '111'],
+                      'negative': [r for r in rows if r['complete_labels'] and r['class_code'] in negative_codes]}
         result['constraints'][name] = {}
         for scope, selected in scopes.items():
             excess = [max(r['p_pht'] - r[f'p_{pair}'] - margin, 0.0) for r in selected]
@@ -90,6 +98,8 @@ def evaluate_task(model, loader, task, *, precision='none', threshold=None, sele
     model.eval()
     device = next(model.parameters()).device
     labels, probabilities, rows = [], [], []
+    ph_only = model.ph_only_triplets
+    prediction_tasks = ('ph', 'pht') if ph_only else ('ph', 'pt', 'pht')
     diagnostics = []
     stats = RoutingStatistics()
     fusion = FusionStatistics()
@@ -111,23 +121,34 @@ def evaluate_task(model, loader, task, *, precision='none', threshold=None, sele
         labels.extend(targets.cpu().tolist())
         probabilities.extend(probs.tolist())
         stats.update({t: g[valid] for t, g in output.routing.items()})
+        alpha = output.fusion_alpha
         if output.fusion_beta is not None:
-            fusion.update(output.fusion_beta[valid], batch['peptide_mask'][valid])
+            valid_alpha = alpha[valid] if alpha is not None and alpha.ndim == 1 else alpha
+            fusion.update(output.fusion_beta[valid], batch['peptide_mask'][valid], alpha=valid_alpha)
         details = {}
         if task == 'pht':
             indices = valid.nonzero().flatten().cpu().tolist()
-            predictions = {t: output.logits[t].float().sigmoid().detach().cpu().tolist() for t in ('ph', 'pt', 'pht')}
+            predictions = {t: output.logits[t].float().sigmoid().detach().cpu().tolist() for t in prediction_tasks}
             if any(not np.isfinite(v).all() for v in predictions.values()):
                 raise FloatingPointError('Non-finite auxiliary prediction')
+            if prediction_path and alpha is not None:
+                sample_alphas = alpha.expand_as(logits).cpu().tolist()
             for index in indices:
                 record = raw['records'][index]
-                complete = all(record.masks)
-                code = record.class_code or (''.join(str(int(v)) for v in record.labels) if complete else '')
+                complete = record.masks[0] and record.masks[2] if ph_only else all(record.masks)
+                code = record.class_code or (''.join(str(int(v)) for v in record.labels) if all(record.masks) else '')
+                if ph_only and not code and complete and record.labels[0] == 1:
+                    code = '111' if record.labels[2] == 1 else '100'
                 detail = {'class_code': code, 'complete_labels': complete,
                           **{f'y_{t}': record.labels[j] if record.masks[j] else None
-                             for j, t in enumerate(('ph', 'pt', 'pht'))},
+                             for j, t in enumerate(('ph', 'pt', 'pht')) if t in prediction_tasks},
                           **{f'p_{t}': predictions[t][index] for t in predictions}}
-                for name, pair in (('hierarchy', 'ph'), ('pt_implication', 'pt')):
+                if prediction_path:
+                    detail['fusion_alpha'] = sample_alphas[index] if alpha is not None else None
+                for name, pair, _ in ((PH_HIERARCHY,) if ph_only else CONSTRAINTS):
+                    if ph_only and (not complete or detail['y_ph'] != detail['y_pht']):
+                        detail[f'{name}_excess'] = detail[f'{name}_violation'] = None
+                        continue
                     excess = max(detail['p_pht'] - detail[f'p_{pair}'] - model.consistency_margin, 0.0)
                     detail[f'{name}_excess'] = excess
                     detail[f'{name}_violation'] = excess > 0
@@ -163,7 +184,7 @@ def evaluate_task(model, loader, task, *, precision='none', threshold=None, sele
                 writer.writerow({**row, 'prediction': int(row['probability'] >= threshold), 'threshold': threshold})
     result = {'metrics': metrics, 'threshold': float(threshold), 'routing': stats.result(), 'fusion': fusion.result()}
     if task == 'pht':
-        result['consistency'] = triplet_diagnostics(diagnostics, threshold, model.consistency_margin)
+        result['consistency'] = triplet_diagnostics(diagnostics, threshold, model.consistency_margin, ph_only=ph_only)
     return result
 
 

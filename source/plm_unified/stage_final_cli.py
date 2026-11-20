@@ -35,9 +35,9 @@ def audit_with_report(config, output, splits=('train', 'val')):
         raise
 
 
-def parser_for(action):
-    parser = argparse.ArgumentParser(description=f'Stage Final v1: {action}')
-    parser.add_argument('--config', type=Path, default=Path(__file__).resolve().parents[2] / 'configs/plm_stage_final.yaml')
+def parser_for(action, stage='stage_final'):
+    parser = argparse.ArgumentParser(description=f'{stage}: {action}')
+    parser.add_argument('--config', type=Path, default=Path(__file__).resolve().parents[2] / f'configs/plm_{stage}.yaml')
     parser.add_argument('--device')
     parser.add_argument('--seed', type=int)
     parser.add_argument('--num-workers', type=int)
@@ -78,7 +78,8 @@ def benchmark_paths(config):
 def collect_benchmarks(config, datasets, report):
     for task, paths in benchmark_paths(config).items():
         for path in paths:
-            records, stats = read_task_records(path, task, config.model, expected_split='test')
+            records, stats = read_task_records(path, task, config.model, expected_split='test',
+                                               ph_only_triplets=config.ph_only_triplets)
             heldout = {r.key(task) for r in records}
             for split in ('train', 'val'):
                 if split in datasets:
@@ -142,26 +143,28 @@ def precompute(config, datasets, overwrite):
     return {entity: len(values) for entity, values in sequences.items()}
 
 
-def evaluate(config, args, action, caches, output):
-    checkpoint = load_checkpoint(args.checkpoint, config=config)
+def evaluate(config, args, action, caches, output, model_type=StageFinalBindingModel, checkpoint=None):
+    if checkpoint is None:
+        checkpoint = load_checkpoint(args.checkpoint, config=config)
     for entity, cache in caches.items():
         if checkpoint['encoders'][entity]['checkpoint_fingerprint'] != cache.manifest['model']['checkpoint_fingerprint']:
             raise ValueError(f'{entity}: checkpoint/cache encoder mismatch')
-    model = StageFinalBindingModel(config).to(resolve_device(config.stage_final.device))
+    model = model_type(config).to(resolve_device(config.stage_final.device))
     model.load_state_dict(checkpoint['model'], strict=True)
     model.temperature = checkpoint['temperature']
-    model.consistency_margin = checkpoint['config']['stage_final']['consistency_margin']
+    model.consistency_margin = checkpoint['config'][config.stage_name]['consistency_margin']
     datasets, audit = audit_with_report(config, output)
     paths = benchmark_paths(config) if action == 'benchmark' else {
         task: [config.paths.data_root / task.upper() / f'{args.split}.csv'] for task in args.tasks}
     result = {'architecture': model.architecture, 'checkpoint': str(args.checkpoint.resolve()),
               'training_mode': checkpoint.get('training_mode', 'joint'),
               'checkpoint_epoch': checkpoint['epoch'], 'temperature': model.temperature,
-              'threshold_source': 'checkpoint_validation', 'label_policy': 'triplet_full_supervision', 'results': {}}
+              'threshold_source': 'checkpoint_validation', 'label_policy': audit['label_policy'], 'results': {}}
     for task in args.tasks:
         for path in paths[task]:
             records, stats = read_task_records(path, task, config.model,
-                                               expected_split='test' if action == 'benchmark' else args.split)
+                                               expected_split='test' if action == 'benchmark' else args.split,
+                                               ph_only_triplets=config.ph_only_triplets)
             # Test records cannot coincide with training/validation supervision.
             if action == 'benchmark' or args.split == 'test':
                 heldout = {r.key(task) for r in records}
@@ -178,7 +181,7 @@ def evaluate(config, args, action, caches, output):
             values['cold_audit'] = cold_report(records, path, datasets['train'])
             result['results'][key] = values
     write_json(output / 'metrics.json', result)
-    lines = ['# Stage Final evaluation', '', f'Checkpoint: `{args.checkpoint}`', '',
+    lines = [f'# {model.architecture} evaluation', '', f'Checkpoint: `{args.checkpoint}`', '',
              '| Dataset | N | AUROC | AUPRC | MCC | F1 | Threshold | Cold audit |',
              '|---|---:|---:|---:|---:|---:|---:|---|']
     for key, value in result['results'].items():
@@ -204,9 +207,14 @@ def evaluate(config, args, action, caches, output):
     return result
 
 
-def main(action, argv=None):
-    args = parser_for(action).parse_args(argv)
-    config = load_stage_final_config(args.config)
+def main(action, argv=None, *, config_loader=load_stage_final_config, model_type=StageFinalBindingModel,
+         stage='stage_final', evaluation_setup=None):
+    args = parser_for(action, stage).parse_args(argv)
+    checkpoint = None
+    if evaluation_setup is not None and action in ('evaluate', 'benchmark'):
+        config, model_type, checkpoint = evaluation_setup(args.config, args.checkpoint)
+    else:
+        config = config_loader(args.config)
     if getattr(args, 'swanlab_mode', None) is not None:
         config.swanlab.mode = args.swanlab_mode
     for name in ('device', 'seed', 'num_workers', 'limit_train_samples', 'limit_eval_samples', 'max_steps_per_epoch'):
@@ -239,15 +247,18 @@ def main(action, argv=None):
             write_json(config.paths.cache_root / 'coverage.json', report)
         return report
     if is_training:
+        if args.resume:
+            checkpoint = load_checkpoint(args.resume, config=config, role='last')
         datasets, report = audit_with_report(config, output)
     caches = open_caches(config)
     try:
         if is_training:
-            model = StageFinalBindingModel(config).to(resolve_device(config.stage_final.device))
+            model = model_type(config).to(resolve_device(config.stage_final.device))
             trainer_class = StageFinalSequentialTrainer if action == 'train-sequential' else StageFinalTrainer
             trainer = trainer_class(model, config, datasets, caches, report['dataset_fingerprint'], output)
             if args.resume:
-                trainer.resume(args.resume)
+                trainer.restore_checkpoint(checkpoint)
+                del checkpoint
             write_json(output / 'audit.json', report)
             write_json(output / 'config.json', config.to_dict())
             from .stage_final_tracking import StageFinalTracker
@@ -267,7 +278,7 @@ def main(action, argv=None):
             print(f'Artifacts: {output}', flush=True)
             return trainer.history
         output.mkdir(parents=True, exist_ok=True)
-        return evaluate(config, args, action, caches, output)
+        return evaluate(config, args, action, caches, output, model_type, checkpoint)
     finally:
         for cache in caches.values():
             cache.close()
